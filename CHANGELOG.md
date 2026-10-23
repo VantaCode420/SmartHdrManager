@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Installer** (`SmartHdrManager-v…-setup.exe`, one file for x64 and ARM64 that installs the right version): installs for your Windows user only, no administrator rights – Start menu entry, optional desktop shortcut and *Start with Windows*, uninstall from *Settings › Apps*. Installing a newer version closes the running app first and keeps your settings. The uninstaller removes everything the app registered in Windows and asks whether to delete your settings too. *Check for updates* works in installed copies as before. The zips are still there for anyone who prefers a portable folder.
+- Command line: `--exit` exits the running app (as tray icon › Exit).
+
 ## 2.6.1 – 2026-10
 
 ### Fixed

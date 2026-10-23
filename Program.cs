@@ -63,6 +63,7 @@ namespace SmartHdrManager
 
             // After "Check for updates › Update now": remove the old exe, say what happened
             Updater.CleanUp();
+            Updater.SyncInstalledVersion();
             if (justUpdated)
             {
                 _engine.Log("UPDATE", $"Updated to version {Updater.CurrentVersionText}.");
@@ -75,6 +76,7 @@ namespace SmartHdrManager
         /// <summary>
         /// Command-line actions (--force-hdr, --force-sdr, --auto, --toggle-pause), e.g. for Stream Deck buttons,
         /// desktop shortcuts or scripts. A second launch only signals the running instance and exits.
+        /// --exit closes the running instance as the tray menu's Exit does (used by the installer before it replaces files).
         /// </summary>
         private void RunCommand(CliCommand command)
         {
@@ -92,6 +94,9 @@ namespace SmartHdrManager
                     break;
                 case CliCommand.TogglePause:
                     SetPaused(!_engine.Paused);
+                    break;
+                case CliCommand.Exit:
+                    Exit();
                     break;
             }
         }
@@ -202,7 +207,7 @@ namespace SmartHdrManager
             // A second launch asks the running instance to show its window
             if (_showEvent.WaitOne(0)) ShowMain();
 
-            // ... or to run a command-line action (--force-hdr, --force-sdr, --auto, --toggle-pause)
+            // ... or to run a command-line action (--force-hdr, --force-sdr, --auto, --toggle-pause, --exit)
             var command = _commands.TakeSignaled();
             if (command != CliCommand.None) RunCommand(command);
 
@@ -326,7 +331,7 @@ namespace SmartHdrManager
         }
     }
 
-    internal enum CliCommand { None, ForceHdr, ForceSdr, Auto, TogglePause }
+    internal enum CliCommand { None, ForceHdr, ForceSdr, Auto, TogglePause, Exit }
 
     /// <summary>Named events through which a second launch passes a command-line action to the running tray instance.</summary>
     internal sealed class CommandEvents : IDisposable
@@ -336,8 +341,11 @@ namespace SmartHdrManager
             (CliCommand.ForceHdr, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.ForceHdr")),
             (CliCommand.ForceSdr, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.ForceSdr")),
             (CliCommand.Auto, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.AutoHdr")),
-            (CliCommand.TogglePause, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.TogglePause"))
+            (CliCommand.TogglePause, new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.TogglePause")),
+            (CliCommand.Exit, new EventWaitHandle(false, EventResetMode.AutoReset, ExitEventName))
         };
+
+        public const string ExitEventName = @"Local\SmartHdrManager.Exit";
 
         // "Launch with HDR" (see HdrLauncher): only "hold HDR" / "not now" signals, never a path or command
         private readonly EventWaitHandle _launchHold = new(false, EventResetMode.AutoReset, HdrLauncher.HoldEventName);
@@ -375,6 +383,7 @@ namespace SmartHdrManager
                     case "--force-sdr": return CliCommand.ForceSdr;
                     case "--auto": return CliCommand.Auto;
                     case "--toggle-pause": return CliCommand.TogglePause;
+                    case "--exit": return CliCommand.Exit;
                 }
             }
             return CliCommand.None;
@@ -408,7 +417,7 @@ namespace SmartHdrManager
         /// <summary>
         /// Windows shows the app identity as the sender of notifications. Without a registered name that is the raw
         /// id ("VantaCode420.SmartHdrManager"); this gives it the name "Smart HDR Manager" and the app icon.
-        /// Per user (HKCU), no administrator rights. Removed by hand only (see README › Uninstall).
+        /// Per user (HKCU), no administrator rights. Removed by the uninstaller (--unregister) or by hand (see README › Uninstall).
         /// </summary>
         private static void RegisterNotificationName()
         {
@@ -434,9 +443,27 @@ namespace SmartHdrManager
             catch { }   // cosmetic only
         }
 
+        /// <summary>
+        /// SmartHdrManager.exe --unregister (run by the uninstaller): removes everything the app wrote to the registry –
+        /// "Start with Windows", the "Play with HDR" / "(with HDR)" player entries and the notification name.
+        /// Settings and log files are not touched (the uninstaller asks about those).
+        /// </summary>
+        private static void RemoveRegistrations()
+        {
+            TrayAndStartupManager.SetAutostart(false);
+            VideoPlayers.RemoveAll();
+            try { Registry.CurrentUser.DeleteSubKeyTree($@"Software\Classes\AppUserModelId\{AppUserModelId}", false); } catch { }
+        }
+
         [STAThread]
         private static void Main(string[] args)
         {
+            if (args.Any(a => a.Equals("--unregister", StringComparison.OrdinalIgnoreCase)))
+            {
+                RemoveRegistrations();
+                return;
+            }
+
             // "Launch with HDR": SmartHdrManager.exe --launch <game> [arguments] – starts a game with HDR already on.
             // Runs as its own small process (no window, no tray icon) and exits when the game has closed.
             int launchIndex = Array.FindIndex(args, a => a.Equals("--launch", StringComparison.OrdinalIgnoreCase) ||
@@ -454,6 +481,25 @@ namespace SmartHdrManager
             var command = CommandEvents.Parse(args);
             // A command-line action never opens the window: the app (re)starts quietly in the tray
             bool startHidden = command != CliCommand.None || args.Any(a => a.Equals("--tray", StringComparison.OrdinalIgnoreCase));
+
+            // --exit (run by the installer before it replaces files): asks the running copy to exit as the tray menu's
+            // Exit does and waits until it has (up to 15 s), so its exe is no longer in use when this process ends.
+            // Nothing to do when no copy runs, or when it is a version without --exit (it has no exit event).
+            if (command == CliCommand.Exit)
+            {
+                if (EventWaitHandle.TryOpenExisting(CommandEvents.ExitEventName, out var exitEvent))
+                {
+                    using (exitEvent) exitEvent.Set();
+                    try
+                    {
+                        using var running = Mutex.OpenExisting(@"Local\SmartHdrManager.SingleInstance");
+                        running.WaitOne(TimeSpan.FromSeconds(15));
+                    }
+                    catch (AbandonedMutexException) { }               // it has exited
+                    catch (WaitHandleCannotBeOpenedException) { }     // it had already exited
+                }
+                return;
+            }
 
             using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, @"Local\SmartHdrManager.ShowWindow");
             using var commands = new CommandEvents();

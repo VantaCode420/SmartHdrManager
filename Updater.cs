@@ -322,6 +322,26 @@ namespace SmartHdrManager
             }
         }
 
+        /// <summary>The installer's AppId (installer\SmartHdrManager.iss): its entry in Settings › Apps › Installed apps.</summary>
+        private const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\{2D815E3F-DDE7-4630-9749-D3885F39D122}_is1";
+
+        /// <summary>
+        /// Installed with the setup (per user): keeps the version shown in Settings › Apps › Installed apps in step after
+        /// "Check for updates" (or files replaced by hand) put a newer exe into the install folder. Does nothing for
+        /// unzipped copies, and for an install for all users (that entry is not writable without administrator rights).
+        /// </summary>
+        public static void SyncInstalledVersion()
+        {
+            try
+            {
+                using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(UninstallKey, writable: true);
+                if (key?.GetValue("InstallLocation") is not string location) return;
+                if (!string.Equals(location.TrimEnd('\\'), AppContext.BaseDirectory.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return;
+                if (key.GetValue("DisplayVersion") as string != CurrentVersionText) key.SetValue("DisplayVersion", CurrentVersionText);
+            }
+            catch { }
+        }
+
         /// <summary>After an update: deletes SmartHdrManager.exe.old and the download (in the background, with retries).</summary>
         public static void CleanUp()
         {

@@ -421,6 +421,37 @@ namespace SmartHdrManager
             }
         }
 
+        /// <summary>
+        /// Uninstall: removes every "Play with HDR" right-click entry and every "(with HDR)" app registration, for all
+        /// players, plus the app's own key (HKCU\Software\SmartHdrManager).
+        /// </summary>
+        public static void RemoveAll()
+        {
+            foreach (string rootPath in MenuRoots().Append(LegacyMenuRoot))
+            {
+                try
+                {
+                    using var root = Registry.CurrentUser.OpenSubKey(rootPath, writable: true);
+                    if (root == null) continue;
+                    foreach (string sub in root.GetSubKeyNames().Where(n => n.StartsWith(MenuPrefix, StringComparison.OrdinalIgnoreCase)))
+                        root.DeleteSubKeyTree(sub, false);
+                }
+                catch { }
+            }
+
+            string[] players = Array.Empty<string>();
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(PlayersRoot);
+                if (key != null) players = key.GetSubKeyNames();
+            }
+            catch { }
+            foreach (string player in players) UnregisterApp(player + ".exe");   // the key is the player's exe name
+
+            try { Registry.CurrentUser.DeleteSubKeyTree(@"Software\SmartHdrManager", false); } catch { }
+            NotifyAssociationsChanged();
+        }
+
         /// <summary>The app was moved: point the registered "(with HDR)" apps at this exe. Returns how many were updated.</summary>
         public static int RefreshAppRegistrations(string launcherExe)
         {

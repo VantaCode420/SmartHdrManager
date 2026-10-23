@@ -18,7 +18,8 @@ Turns Windows HDR on automatically when you need it – HDR games, HDR videos on
 
 | File | Size | Use it if … |
 |---|---|---|
-| `SmartHdrManager-v…-win-x64-standalone.zip` | large | **You are not sure.** Runs on any 64-bit Windows 10/11, nothing else to install. |
+| `SmartHdrManager-v…-setup.exe` | large | **You are not sure.** Installer for x64 and Windows on ARM (picks the right version): Start menu entry, optional *Start with Windows*, uninstall from *Settings › Apps*. No administrator rights, nothing else to install. |
+| `SmartHdrManager-v…-win-x64-standalone.zip` | large | You prefer a folder you unzip yourself (portable). Runs on any 64-bit Windows 10/11, nothing else to install. |
 | `SmartHdrManager-v…-win-x64.zip` | small | You already have the **.NET 10 Desktop Runtime** installed ([download](https://dotnet.microsoft.com/download/dotnet/10.0) → ".NET Desktop Runtime", x64). |
 | `SmartHdrManager-v…-win-arm64-standalone.zip` | large | *Experimental, untested.* Windows on ARM (e.g. Snapdragon X laptops), nothing else to install. |
 | `SmartHdrManager-v…-win-arm64.zip` | small | *Experimental, untested.* Windows on ARM with the .NET 10 Desktop Runtime **Arm64** installed. |
@@ -28,6 +29,17 @@ Not sure if your PC is ARM? *Settings › System › About › System type* says
 Requirements: Windows 10 or 11 (64-bit) and an HDR-capable monitor with HDR available in *Windows Settings › Display*.
 
 ## Installation
+
+**With the installer** (`…-setup.exe`):
+
+1. Start the setup. **"Windows protected your PC"?** The installer is not code-signed either: click **More info › Run anyway** (how to check the file first: see *From the zip*, step 3).
+2. Choose whether the app starts with Windows and whether you want a desktop shortcut. It installs for your Windows user only, in `%LocalAppData%\Programs\Smart HDR Manager` – no administrator rights needed, and *Check for updates* keeps working.
+3. To install a newer version by hand, run its setup: the running app is closed first, your settings, games and *Start with Windows* choice are kept.
+
+To install for all users (in Program Files), start the setup with `/ALLUSERS` from a command prompt as administrator. *Check for updates* cannot write there: update by running the new setup.
+Silent install for scripts: `/VERYSILENT` (add `/TASKS=autostart,desktopicon` to choose the options).
+
+**From the zip:**
 
 1. Unzip to a permanent folder, e.g. `C:\Tools\Smart HDR Manager`. (Don't run it from inside the zip or from Downloads – "Start with Windows" remembers the location.)
 2. Start `SmartHdrManager.exe`.
@@ -69,6 +81,7 @@ SmartHdrManager.exe --force-sdr      SDR until changed back
 SmartHdrManager.exe --auto           back to automatic switching
 SmartHdrManager.exe --toggle-pause   pause / resume automation
 SmartHdrManager.exe --tray           start hidden in the tray
+SmartHdrManager.exe --exit           exit the running app (as tray icon › Exit)
 SmartHdrManager.exe --launch "C:\Games\Game\game.exe"   HDR on first, then start the game (see below)
 SmartHdrManager.exe --launch-video "C:\...\mpc-hc64.exe" "movie.mkv"   same for a video player (ends when its window closes)
 ```
@@ -259,12 +272,18 @@ Please open an [issue on GitHub](https://github.com/VantaCode420/SmartHdrManager
 
 ## Uninstall
 
+**Installed with the setup:** *Windows Settings › Apps › Installed apps › Smart HDR Manager › Uninstall*. The uninstaller closes the app and removes *Start with Windows*, the "Play with HDR" / "(with HDR)" player entries and the notification name. At the end it asks whether to delete your settings and log too (choose *No* to keep them for later). Remove the browser script in the Tampermonkey dashboard.
+
+**Unzipped by hand:**
+
 1. Settings › turn off **Start with Windows** (removes the startup entry).
 2. Exit the app (tray icon › Exit) and delete its folder.
 3. Optional: delete `%AppData%\SmartHdrManager` (settings) and `%LocalAppData%\SmartHdrManager` (log).
 4. In the browser: remove the script in the Tampermonkey dashboard.
 5. If you used *Default app…* / right-click entries for players: remove them in the Apps tab first (More menu). Otherwise Windows keeps showing them; they live under `HKEY_CURRENT_USER\Software\Classes` (`SmartHdrManager.HdrPlay.*`, `SystemFileAssociations\<.ext>\shell\SmartHdrManager.*`) and `HKEY_CURRENT_USER\Software\SmartHdrManager`.
 6. Optional: delete `HKEY_CURRENT_USER\Software\Classes\AppUserModelId\VantaCode420.SmartHdrManager` (the app's name for Windows notifications).
+
+Shortcut for steps 1, 5 and 6: exit the app, then run `SmartHdrManager.exe --unregister` once before you delete the folder.
 
 ## License
 

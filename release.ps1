@@ -6,7 +6,14 @@
 #   SmartHdrManager-vX.Y.Z-win-x64-standalone    larger exe, runs on any 64-bit Windows 10/11
 #   SmartHdrManager-vX.Y.Z-win-arm64             small exe for Windows on ARM, needs the .NET 10 Desktop Runtime (Arm64)
 #   SmartHdrManager-vX.Y.Z-win-arm64-standalone  larger exe for Windows on ARM, nothing to install
-# plus a .zip of each and SHA256 checksums.
+# plus a .zip of each, an installer and SHA256 checksums:
+#   SmartHdrManager-vX.Y.Z-setup.exe             installs the standalone version that fits the PC, x64 or ARM64
+#                                                (per user, no admin rights)
+# With -Arch x64 / -Arch arm64 the installer holds that architecture only:
+#   SmartHdrManager-vX.Y.Z-win-x64-setup.exe / SmartHdrManager-vX.Y.Z-win-arm64-setup.exe
+#
+# The installer needs Inno Setup 6.6 or newer (winget install JRSoftware.InnoSetup.7). Without it, or with
+# -NoInstaller, only the zips are built.
 #
 # Only whitelisted files are copied (exe, README, CHANGELOG, LICENSE, userscript), so your own
 # config.json, config.json.old, logs and backup folders can never end up in a release.
@@ -18,11 +25,13 @@
 #   powershell -ExecutionPolicy Bypass -File .\release.ps1                  (x64 + ARM64)
 #   powershell -ExecutionPolicy Bypass -File .\release.ps1 -Arch x64        (x64 only)
 #   powershell -ExecutionPolicy Bypass -File .\release.ps1 -Arch arm64 -Output 'S:\Smart HDR Manager ARM'
+#   powershell -ExecutionPolicy Bypass -File .\release.ps1 -NoInstaller            (zips only)
 # ---------------------------------------------------------------------------
 param(
     [string]$Output = 'S:\Smart HDR Manager',
     [ValidateSet('all', 'x64', 'arm64')]
-    [string]$Arch = 'all'
+    [string]$Arch = 'all',
+    [switch]$NoInstaller
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +40,20 @@ $project = Join-Path $src 'SmartHdrManager.csproj'
 
 function Step($text) { Write-Host ''; Write-Host "==> $text" -ForegroundColor Cyan }
 function Fail($text) { Write-Host ''; Write-Host "ERROR: $text" -ForegroundColor Red; exit 1 }
+
+# Inno Setup's command-line compiler: on the PATH, or in the default folders of Inno Setup 7 and 6
+function Find-Iscc {
+    $cmd = Get-Command 'ISCC.exe' -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, (Join-Path $env:LOCALAPPDATA 'Programs'))) {
+        if (-not $base) { continue }
+        foreach ($name in 'Inno Setup 7', 'Inno Setup 6') {
+            $path = Join-Path (Join-Path $base $name) 'ISCC.exe'
+            if (Test-Path $path) { return $path }
+        }
+    }
+    return $null
+}
 
 # ---- checks ----
 if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { Fail 'dotnet was not found. Install the .NET 10 SDK.' }
@@ -44,6 +67,17 @@ $fullSrc = [System.IO.Path]::GetFullPath($src).TrimEnd('\')
 if ($fullOut -eq $fullSrc -or $fullOut.StartsWith("$fullSrc\", [System.StringComparison]::OrdinalIgnoreCase) -or
     $fullSrc.StartsWith("$fullOut\", [System.StringComparison]::OrdinalIgnoreCase)) {
     Fail "The output folder must be outside the source folder: $Output"
+}
+
+$iss = Join-Path $src 'installer\SmartHdrManager.iss'
+$iscc = $null
+if (-not $NoInstaller) {
+    if (-not (Test-Path $iss)) { Fail "Missing $iss" }
+    $iscc = Find-Iscc
+    if (-not $iscc) {
+        Write-Host 'Inno Setup was not found: building the zips only. Install it to get the setup.exe files too:' -ForegroundColor Yellow
+        Write-Host '  winget install JRSoftware.InnoSetup.7     (or run again with -NoInstaller to hide this message)' -ForegroundColor Yellow
+    }
 }
 
 [xml]$xml = Get-Content $project
@@ -111,12 +145,26 @@ foreach ($p in $packages) {
     Compress-Archive -Path (Join-Path $dest '*') -DestinationPath (Join-Path $Output "$($p.Name).zip") -CompressionLevel Optimal
 }
 
+# ---- installer (standalone version: nothing else to install) ----
+if ($iscc) {
+    $standalone = { param($a) Join-Path $Output "SmartHdrManager-v$version-win-$a-standalone" }
+    if ($Arch -eq 'all') {
+        Step 'Building the installer (x64 + ARM64)'
+        & $iscc '/Qp' '/DArch=all' "/DAppVersion=$version" "/DSourceDirX64=$(& $standalone 'x64')" "/DSourceDirArm64=$(& $standalone 'arm64')" "/DOutputDir=$fullOut" $iss
+    }
+    else {
+        Step "Building the installer for win-$Arch"
+        & $iscc '/Qp' "/DArch=$Arch" "/DAppVersion=$version" "/DSourceDir=$(& $standalone $Arch)" "/DOutputDir=$fullOut" $iss
+    }
+    if ($LASTEXITCODE -ne 0) { Fail 'Installer build failed. See the messages above.' }
+}
+
 # ---- checksums ----
 # Full build: SHA256SUMS.txt. Single architecture: SHA256SUMS-x64.txt / SHA256SUMS-arm64.txt,
 # so it can be uploaded next to an existing SHA256SUMS.txt without replacing it.
 $sumsName = if ($Arch -eq 'all') { 'SHA256SUMS.txt' } else { "SHA256SUMS-$Arch.txt" }
 Step "Writing SHA256 checksums ($sumsName)"
-$sums = Get-ChildItem $Output -Filter '*.zip' | ForEach-Object {
+$sums = Get-ChildItem $Output -File | Where-Object { $_.Name -like '*.zip' -or $_.Name -like '*-setup.exe' } | ForEach-Object {
     "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
 }
 $sums += Get-ChildItem $Output -Recurse -Filter 'SmartHdrManager.exe' | ForEach-Object {
@@ -134,5 +182,5 @@ Get-ChildItem $Output -Recurse -File | ForEach-Object {
 Write-Host ''
 Write-Host 'Before publishing:' -ForegroundColor Yellow
 Write-Host '  1. Run the exes you can run once and do the quick test (ARM64 exes only start on Windows on ARM).'
-Write-Host '  2. Upload the zips to https://www.virustotal.com and keep the report links for your release notes.'
-Write-Host "  3. Attach the zips and $sumsName to the release."
+Write-Host '  2. Upload the zips and the setup.exe to https://www.virustotal.com and keep the report links for your release notes.'
+Write-Host "  3. Attach the zips, the setup.exe and $sumsName to the release."
