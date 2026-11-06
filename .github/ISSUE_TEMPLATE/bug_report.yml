@@ -13,7 +13,7 @@ body:
     attributes:
       label: App version
       description: Settings › Updates shows it (or right-click SmartHdrManager.exe › Properties › Details)
-      placeholder: "2.6.1"
+      placeholder: "2.6.2"
     validations:
       required: true
   - type: input
