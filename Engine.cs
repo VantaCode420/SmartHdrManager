@@ -130,6 +130,9 @@ namespace SmartHdrManager
             public readonly HashSet<string> AllVideoApps;   // browsers + players, also the ones set to "don't touch HDR"
             public readonly HashSet<string> HdrOnlyApps;    // browsers / players set to "only HDR videos"
             public readonly bool KeepDesktopSdr;            // 2.5 behaviour: also switch back HDR the app did not turn on
+            // HDR library games whose exe location is known: process name -> the game's install folder(s) and exe(s). A
+            // process with the same name that runs from somewhere else is another program (e.g. two unrelated "game.exe").
+            public readonly Dictionary<string, (string[] Folders, string[] Exes)> GameFolders;
 
             public Snapshot(AppConfig c)
             {
@@ -195,7 +198,58 @@ namespace SmartHdrManager
                 VideoActivationMs = Math.Clamp(c.VideoHdrActivationSeconds, 0, 30) * 1000L;
                 VideoRevertMs = Math.Clamp(c.VideoHdrRevertSeconds, 0, MaxVideoRevertSeconds) * 1000L;
                 VideoApps = new HashSet<string>(Browsers.Concat(LocalPlayers), Cmp);
+                GameFolders = BuildGameFolders(c, HdrGames);
             }
+
+            /// <summary>
+            /// Install folders and known exes of the HDR games from the launcher libraries, by process name. Strings only:
+            /// the snapshot is built under the config lock, so nothing here touches the disk (a sleeping drive or an
+            /// offline NAS would block the UI). Programs added by hand are not listed and stay matched by name.
+            /// </summary>
+            private static Dictionary<string, (string[] Folders, string[] Exes)> BuildGameFolders(AppConfig c, HashSet<string> hdrGames)
+            {
+                var folders = new Dictionary<string, HashSet<string>>(Cmp);
+                var exes = new Dictionary<string, HashSet<string>>(Cmp);
+                void Add(string process, string? exePath)
+                {
+                    if (string.IsNullOrEmpty(exePath)) return;
+                    try
+                    {
+                        string? folder = InstallFolder(exePath);
+                        if (string.IsNullOrEmpty(folder)) return;
+                        if (!folders.TryGetValue(process, out var set)) folders[process] = set = new HashSet<string>(Cmp);
+                        set.Add(folder.TrimEnd('\\'));
+                        if (!exes.TryGetValue(process, out var files)) exes[process] = files = new HashSet<string>(Cmp);
+                        files.Add(Path.GetFullPath(exePath));
+                    }
+                    catch { }
+                }
+
+                // Library exes only: ProgramPaths holds the first exe of that name found anywhere (drive scan, Game Bar,
+                // program caches), which may be the other program. A moved game passes because its old exe is gone.
+                foreach (var g in c.LibraryGames ?? new List<LibraryGame>())
+                    foreach (string p in g.Processes ?? new List<string>())
+                        if (hdrGames.Contains(p)) Add(p, g.ExePath);   // the game's other exes (Unreal shipping exe, learned games) live in the same folder
+                return folders.ToDictionary(kv => kv.Key, kv => (kv.Value.ToArray(), exes[kv.Key].ToArray()), Cmp);
+            }
+
+            /// <summary>
+            /// The game's install folder for an exe: its game folder, or the folder above when the exe sits in one of the
+            /// game's own subfolders ("boot\", "Launcher\", "game\", "_retail_\"). Never a shared folder.
+            /// </summary>
+            private static string? InstallFolder(string exePath)
+            {
+                string? folder = HdrLauncher.GameFolder(exePath) ?? Path.GetDirectoryName(Path.GetFullPath(exePath));
+                if (string.IsNullOrEmpty(folder)) return null;
+                string name = Path.GetFileName(folder);
+                if (!name.StartsWith('_') && !GameSubfolders.Contains(name)) return folder;
+                return HdrLauncher.GameFolder(folder) ?? folder;   // GameFolder of a folder: its parent, same checks
+            }
+
+            private static readonly HashSet<string> GameSubfolders = new(StringComparer.OrdinalIgnoreCase)
+            {
+                "boot", "launcher", "game", "client", "retailclient", "system", "engine", "content", "live", "release", "shipping"
+            };
         }
 
         private volatile Snapshot? _snapshot;
@@ -640,20 +694,25 @@ namespace SmartHdrManager
             try
             {
                 Dictionary<string, LibraryGame>? previous = null;
-                if (!fullRescan)
+                HashSet<string> apps;
+                lock (Sync)
                 {
                     // Copies: the scan runs outside the lock, while the engine thread may add a learned launcher game
-                    lock (Sync)
+                    if (!fullRescan)
                         previous = (Config.LibraryGames ?? new List<LibraryGame>())
                             .GroupBy(g => g.Id, Cmp).ToDictionary(g => g.Key, g => CopyOf(g.First()), Cmp);
+                    apps = new HashSet<string>((Config.AppRules ?? new Dictionary<string, AppRule>()).Keys, Cmp);   // Apps tab: not games
                 }
 
-                var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg));
+                var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg), apps);
                 var knownPaths = GameLibraryScanner.FindKnownExePaths();
                 int iconsFound = 0;
                 lock (Sync)
                 {
                     MergeLearnedLaunchers(games);
+                    // A Game Bar suggestion for a game process learned from its launcher would list the game twice
+                    var covered = new HashSet<string>(games.Where(g => g.Source != "Game Bar").SelectMany(g => g.Processes), Cmp);
+                    games.RemoveAll(g => g.Source == "Game Bar" && g.Processes.Any(covered.Contains));
                     CarryOverGameSettings(Config.LibraryGames ?? new List<LibraryGame>(), games);
                     Config.LibraryGames = games;
                     InvalidateSnapshot();
@@ -676,7 +735,7 @@ namespace SmartHdrManager
                     Save();
                 }
                 if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
-                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar).");
+                Log("SCAN", $"Game library: {games.Count} games found (Steam, Epic, GOG, Xbox, Ubisoft, EA, Rockstar, Battle.net, Amazon, itch.io, Riot, Heroic, Game Bar).");
                 LibraryChanged?.Invoke(this, EventArgs.Empty);
             }
             catch (Exception ex)
@@ -709,7 +768,8 @@ namespace SmartHdrManager
         /// <summary>
         /// A rescan can detect other exes for a game than before (2.5.2: launchers are skipped, several exes per game).
         /// HDR on/off and the game options are stored per process name, so carry them over to the new names – otherwise
-        /// a game that was turned on would suddenly show as off, plus a stray row for the old launcher. Caller holds Sync.
+        /// a game that was turned on would suddenly show as off, plus a stray row for the old launcher. "Never HDR" and
+        /// the game options are carried over the same way. Caller holds Sync.
         /// </summary>
         private void CarryOverGameSettings(List<LibraryGame> oldGames, List<LibraryGame> newGames)
         {
@@ -743,6 +803,13 @@ namespace SmartHdrManager
                             changed = true;
                         }
                     }
+                }
+
+                // "Never HDR" follows the game too: a new exe must not bring an excluded game back to the list
+                if (!wasOn && old.Processes.Any(ignored.Contains))
+                {
+                    foreach (string p in added)
+                        if (ignored.Add(p)) { Config.IgnoredGames.Add(p); changed = true; }
                 }
 
                 // Game options (start delay, keep HDR after exit) follow the game as well
@@ -965,9 +1032,11 @@ namespace SmartHdrManager
 
             if ((PollHotkeys || PollOverrideHotkey) && s.HotkeyMode != HotkeySettings.Off) PollHotkeysFallback(now, s.HotkeyMode);
 
-            var (procName, title, isFullscreen) = WindowDetector.GetActiveWindowState();
+            var (procName, title, isFullscreen, procId) = WindowDetector.GetActiveWindowInfo();
             _foregroundProcess = procName;
             _foregroundFullscreen = isFullscreen;
+            _foregroundElsewhere = s.HdrGames.Contains(procName) && s.GameFolders.ContainsKey(procName) &&
+                                   !IsGameLocation(s, procName, procId);
             NoteBrowserScript(s, procName, title);
 
             RefreshHdrState(s, now);
@@ -1224,7 +1293,7 @@ namespace SmartHdrManager
                 _allBlockLogged = null;
             }
 
-            bool shouldEnableHdr = EvaluateHdrRequirement(s, procName, title, isFullscreen, out string reason);
+            bool shouldEnableHdr = EvaluateHdrRequirement(s, procName, title, isFullscreen, _foregroundElsewhere, out string reason);
             bool isForceSdr = s.ForceSdr.Contains(procName);
             if (isForceSdr) _forceSdrSeenMs = now;
 
@@ -1314,7 +1383,7 @@ namespace SmartHdrManager
             }
 
             // Per-game start delay: wait N seconds after the game appears before switching HDR on
-            string? hdrGame = s.HdrGames.Contains(procName) ? procName : _runningGame;
+            string? hdrGame = s.HdrGames.Contains(procName) && !_foregroundElsewhere ? procName : _runningGame;
             if (hdrGame == null)
             {
                 _delayGame = null;
@@ -1346,7 +1415,7 @@ namespace SmartHdrManager
             {
                 _monitorCheckedGame = null;
             }
-            else if (shouldEnableHdr && s.HdrGames.Contains(procName) &&
+            else if (shouldEnableHdr && s.HdrGames.Contains(procName) && !_foregroundElsewhere &&
                      !string.Equals(_monitorCheckedGame, procName, StringComparison.OrdinalIgnoreCase))
             {
                 _monitorCheckedGame = procName;
@@ -1388,7 +1457,7 @@ namespace SmartHdrManager
             string demand;
             if (!shouldEnableHdr) demand = isForceSdr ? "sdr:" + procName : "none";
             else if (_runningGame != null) demand = "game:" + _runningGame;
-            else if (s.HdrGames.Contains(procName)) demand = "game:" + procName;
+            else if (s.HdrGames.Contains(procName) && !_foregroundElsewhere) demand = "game:" + procName;
             else if (launchHold) demand = "launch";
             else if (_externalHoldProcess != null) demand = "ext:" + _externalHoldProcess;
             else if (_followLauncher != null && _followHoldsHdr) demand = "follow:" + _followLauncher;
@@ -1421,7 +1490,7 @@ namespace SmartHdrManager
                 _externalEnded = false;
                 if (!_hdrAll && canAttempt)
                 {
-                    string? game = _runningGame ?? (s.HdrGames.Contains(procName) ? procName : null);
+                    string? game = _runningGame ?? (s.HdrGames.Contains(procName) && !_foregroundElsewhere ? procName : null);
                     TurnHdrOn(reason, Target(s));
                     if (_hdrAll && game != null && !launchHold)
                     {
@@ -1976,6 +2045,45 @@ namespace SmartHdrManager
         // Programs whose exe path was already looked up (once per program per session)
         private readonly HashSet<string> _pathLookupDone = new(StringComparer.OrdinalIgnoreCase);
 
+        // Exe location check, by process id and name: true = runs from its game's folder (or the location is unknown)
+        private readonly Dictionary<(int Pid, string Name), bool> _locationOk = new();
+        private Snapshot? _locationSnapshot;
+        private bool _foregroundElsewhere;   // the program in front has an HDR game's name but runs from another folder
+
+        /// <summary>
+        /// False when an HDR library game's process name runs from outside that game's install folder – another program
+        /// with the same name. Unknown locations count as a match (as before): a game without a known exe, a game whose
+        /// known exes are all gone (moved or reinstalled), or a process whose path cannot be read. Folder links and
+        /// junctions are followed. Uses limited query access only, once per process (anti-cheat safe).
+        /// </summary>
+        private bool IsGameLocation(Snapshot s, string process, int pid)
+        {
+            if (!s.GameFolders.TryGetValue(process, out var known)) return true;
+            if (!ReferenceEquals(s, _locationSnapshot) || _locationOk.Count > 256)
+            {
+                _locationOk.Clear();   // new configuration (folders may have changed) or a long session: check again
+                _locationSnapshot = s;
+            }
+            var key = (pid, process.ToLowerInvariant());
+            if (_locationOk.TryGetValue(key, out bool ok)) return ok;
+
+            string? path = ProcessPaths.TryGetExePath(pid);
+            // Xbox / Microsoft Store games run from a WindowsApps path that is not their XboxGames folder
+            ok = path == null || path.Contains(@"\WindowsApps\", StringComparison.OrdinalIgnoreCase) ||
+                 known.Folders.Any(f => path.StartsWith(f + "\\", StringComparison.OrdinalIgnoreCase));
+            // Slower checks only for a process outside the known folders (once per process)
+            if (!ok) ok = !known.Exes.Any(File.Exists);
+            if (!ok)
+            {
+                string real = RealPath(path!);
+                ok = known.Folders.Any(f => real.StartsWith(RealPath(f) + "\\", StringComparison.OrdinalIgnoreCase)) ||
+                     known.Exes.Any(e => Path.GetFileName(e).Equals(Path.GetFileName(path), StringComparison.OrdinalIgnoreCase) && SameFile(path!, e));
+            }
+            if (!ok) Log("HDR", $"'{process}' runs from {path} – not from the folder of the game in your list, so it is ignored.");
+            _locationOk[key] = ok;
+            return ok;
+        }
+
         private string? FindRunningHdrGame(Snapshot s, out string? exePath, out string? videoBlocker, out string? allBlocker)
         {
             exePath = null;
@@ -2003,7 +2111,7 @@ namespace SmartHdrManager
                     if (found == null)
                     {
                         string name = p.ProcessName;
-                        if (s.HdrGames.Contains(name) && !s.Ignored.Contains(name))
+                        if (s.HdrGames.Contains(name) && !s.Ignored.Contains(name) && IsGameLocation(s, name, p.Id))
                         {
                             found = name.ToLowerInvariant();
                             // First time this game is seen running: note its exe for the icon in the Games tab
@@ -2327,7 +2435,53 @@ namespace SmartHdrManager
             }
         }
 
-        private static bool EvaluateHdrRequirement(Snapshot s, string procName, string title, bool isFullscreen, out string reason)
+        /// <summary>
+        /// A path with every folder link and junction in it resolved ("C:\Games\X" → "D:\Games\X" when C:\Games links to
+        /// D:\Games). The path itself when it cannot be resolved.
+        /// </summary>
+        private static string RealPath(string path)
+        {
+            try
+            {
+                string full = Path.GetFullPath(path).TrimEnd('\\');
+                string current = Path.GetPathRoot(full) ?? string.Empty;
+                if (current.Length == 0) return full;
+                foreach (string part in full.Substring(current.Length).Split('\\', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    current = Path.Combine(current, part);
+                    var info = new DirectoryInfo(current);
+                    if (info.LinkTarget != null && info.ResolveLinkTarget(returnFinalTarget: true) is { } target)
+                        current = target.FullName;
+                }
+                return current.TrimEnd('\\');
+            }
+            catch
+            {
+                return path;
+            }
+        }
+
+        /// <summary>
+        /// The same exe reached through another path, such as a mapped drive. Compared by size and time stamp;
+        /// a file that cannot be read counts as the same (unknown = no change in behaviour).
+        /// </summary>
+        private static bool SameFile(string a, string b)
+        {
+            try
+            {
+                var fa = new FileInfo(a);
+                var fb = new FileInfo(b);
+                if (!fa.Exists || !fb.Exists) return !fa.Exists;
+                return fa.Length == fb.Length && fa.LastWriteTimeUtc == fb.LastWriteTimeUtc;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
+        /// <param name="otherProgram">The program in front only shares an HDR game's process name (see <see cref="IsGameLocation"/>).</param>
+        private static bool EvaluateHdrRequirement(Snapshot s, string procName, string title, bool isFullscreen, bool otherProgram, out string reason)
         {
             reason = string.Empty;
             if (string.IsNullOrEmpty(procName)) return false;
@@ -2336,7 +2490,7 @@ namespace SmartHdrManager
                 return false;
 
             // 1. Selected HDR games
-            if (s.HdrGames.Contains(procName))
+            if (s.HdrGames.Contains(procName) && !otherProgram)
             {
                 reason = $"HDR game/app in focus ({procName})";
                 return true;

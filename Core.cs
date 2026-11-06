@@ -189,7 +189,7 @@ namespace SmartHdrManager
     {
         public string Id { get; set; } = string.Empty;          // e.g. "steam:1091500"
         public string Name { get; set; } = string.Empty;        // display name, e.g. "Cyberpunk 2077"
-        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar
+        public string Source { get; set; } = string.Empty;      // Steam / Epic / GOG / Xbox / Ubisoft / EA app / Rockstar / Battle.net / Amazon Games / itch.io / Riot Games / Heroic (…) / Game Bar
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
         public int ScanVersion { get; set; }                    // GameLibraryScanner.CurrentScanVersion when it was detected
@@ -1288,8 +1288,15 @@ namespace SmartHdrManager
 
         public static (string ProcessName, string WindowTitle, bool IsFullscreen) GetActiveWindowState()
         {
+            var (processName, title, isFullscreen, _) = GetActiveWindowInfo();
+            return (processName, title, isFullscreen);
+        }
+
+        /// <summary>Like <see cref="GetActiveWindowState"/>, plus the process id of the same window (0 = no window).</summary>
+        public static (string ProcessName, string WindowTitle, bool IsFullscreen, int ProcessId) GetActiveWindowInfo()
+        {
             IntPtr hWnd = GetForegroundWindow();
-            if (hWnd == IntPtr.Zero) return (string.Empty, string.Empty, false);
+            if (hWnd == IntPtr.Zero) return (string.Empty, string.Empty, false, 0);
 
             // One reusable buffer per thread instead of a new StringBuilder 10x per second
             var sb = _titleBuffer ??= new StringBuilder(512);
@@ -1302,7 +1309,7 @@ namespace SmartHdrManager
 
             bool isFullscreen = processName != "explorer" && processName != "searchhost" && IsWindowFullscreen(hWnd);
 
-            return (processName, title, isFullscreen);
+            return (processName, title, isFullscreen, (int)pid);
         }
 
         private static bool IsWindowFullscreen(IntPtr hWnd)

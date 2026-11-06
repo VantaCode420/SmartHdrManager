@@ -340,7 +340,7 @@ namespace SmartHdrManager
             exclude.Click += (_, _) => OnExclude();
             _scanButton.Click += OnScan;
 
-            _toolTip.SetToolTip(_scanButton, "Re-read the Steam, Epic, GOG, Xbox, Ubisoft, EA and Rockstar libraries and scan your game folders");
+            _toolTip.SetToolTip(_scanButton, "Re-read the libraries of your game launchers (Steam, Epic, GOG, Xbox and more) and scan your game folders");
             foreach (var b in new Control[] { _scanButton, addExe, addRunning, options, exclude })
             {
                 b.Margin = new Padding(0, 0, 8, 0);

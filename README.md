@@ -43,7 +43,7 @@ Settings are stored in `%AppData%\SmartHdrManager\config.json`, the log in `%Loc
 
 | HDR turns on when … | How it is detected |
 |---|---|
-| A game from your list is running | Games tab: games from Steam, Epic, GOG, Xbox, Ubisoft Connect, EA app and Rockstar are found automatically – switch HDR on per game. |
+| A game from your list is running | Games tab: games from Steam, Epic, GOG, Xbox, Ubisoft Connect, EA app, Rockstar, Battle.net, Amazon Games, itch.io, Riot Games and Heroic Games Launcher are found automatically, plus games that the Xbox Game Bar recognised while they ran – switch HDR on per game. |
 | A real HDR video plays on YouTube | The browser script marks the tab (see below). |
 | A local HDR movie plays full screen | Video player (VLC, mpv, mpv.net, MPC-HC, MPC-BE, PotPlayer – see the Apps tab) + "HDR", "Dolby Vision", "DoVi" or "BT2020" in the window title. |
 | A video is opened with "<Player> (with HDR)" | **Apps** tab › Video players: HDR switches on *before* the player starts – best for RTX Video HDR (see below). |
@@ -206,7 +206,7 @@ Settings › YouTube in browser shows **Browser script: Detected ✓** once the 
 ## Safety and privacy
 
 - No telemetry, no ads, and no internet connection – except when you click **Check for updates** (or turn on the weekly check, off by default): then the app asks `api.github.com` for the latest release of this project and, if you click *Update now*, downloads it from `github.com`. Nothing about you or your PC is sent. The download is only installed if its SHA256 matches the release's `SHA256SUMS.txt`.
-- **Anti-cheat safe:** the app never reads or changes game memory and injects nothing. It only reads process names and window titles, like Task Manager does.
+- **Anti-cheat safe:** the app never reads or changes game memory and injects nothing. It only reads process names, their exe paths and window titles, like Task Manager does.
 - Some antivirus programs may be suspicious of an unsigned tray app that watches running programs and has global keyboard shortcuts. The release notes link a VirusTotal scan of exactly these files.
 - **Can the browser script make the app run code?** No. The script only changes the tab title; the app only checks whether a window title *contains* the marker text. Nothing from a title is executed or written anywhere. Any website can set any tab title anyway, so the worst a malicious script or site could do is switch HDR on. The app itself only ever starts Notepad (when you click *Open config.json / log file*), a fixed Windows colour-profile task (off by default), itself (*Start with Windows*, and the new version after *Update now*) and – with *Launch with HDR* / the Apps tab – the game or player named in your own shortcut, Steam launch option, right-click entry or "(with HDR)" app.
 - **Note:** a website can read its own tab title, so in theory it could notice the marker while a video plays and tell that the script is installed. Nothing else is exposed.
