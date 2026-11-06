@@ -252,6 +252,7 @@ namespace SmartHdrManager
         {
             for (int i = 0; i < _pages.Count; i++)
                 _pages[i].Visible = i == index;
+            if (index == 2) UpdateNeverHdrDescription();   // Settings: games excluded meanwhile with Win+Alt+I
         }
 
         private Control BuildGamesPage()

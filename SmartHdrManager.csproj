@@ -14,7 +14,7 @@
     <PlatformTarget Condition="'$(RuntimeIdentifier)' == 'win-arm64'">ARM64</PlatformTarget>
     <RootNamespace>SmartHdrManager</RootNamespace>
     <AssemblyName>SmartHdrManager</AssemblyName>
-    <Version>2.6.1</Version>
+    <Version>2.6.2</Version>
     <!-- Shown in the exe's Properties › Details -->
     <Product>Smart HDR Manager</Product>
     <Authors>VantaCode420</Authors>

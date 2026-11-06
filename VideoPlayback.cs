@@ -92,13 +92,15 @@ namespace SmartHdrManager
     /// Signals:
     ///   • Browsers: the userscript marker in the tab title ([real_hdr_active] = HDR video, [sdr_video_active] = SDR video).
     ///     Without the script: a full-screen browser that is playing sound counts as an SDR video.
-    ///   • Video players: the player's audio session is producing sound; HDR if the window title has an HDR keyword.
+    ///   • Video players: the player's audio session is producing sound; HDR if the window title has an HDR keyword,
+    ///     or the file on the player's command line has one in its name or HDR in its video header (VideoFileInfo).
     /// </summary>
     internal sealed class VideoPlaybackMonitor
     {
         private const int AudibleWindowMs = 1200;   // sound within this time = "playing" (bridges quiet scenes between samples)
 
         private readonly AudioActivity _audio = new();
+        private readonly VideoFileInfo _files = new();   // HDR from the played file when the title has no keyword
         private readonly Dictionary<uint, string> _names = new();
         private long _namesClearedAt;
         private readonly StringBuilder _sb = new(512);
@@ -106,6 +108,7 @@ namespace SmartHdrManager
         private struct WindowInfo
         {
             public IntPtr Hwnd;
+            public uint Pid;
             public string Process;
             public string Title;
             public bool IsBrowser;
@@ -169,6 +172,14 @@ namespace SmartHdrManager
                             if (w.Title.Contains(k, StringComparison.OrdinalIgnoreCase)) { keyword = k; break; }
                         kind = keyword != null ? VideoKind.Hdr : VideoKind.Sdr;
                         source = keyword != null ? $"player is playing, HDR keyword '{keyword}' in the title" : "player is playing";
+
+                        // No keyword in the title (mpv shows the title stored in the file, many names have no "HDR"):
+                        // look at the file on the player's command line – its name and its video header
+                        if (keyword == null && _files.HdrReason(w.Pid, w.Process, w.Title, o.HdrKeywords) is string fromFile)
+                        {
+                            kind = VideoKind.Hdr;
+                            source = $"player is playing, {fromFile}";
+                        }
                     }
                 }
 
@@ -212,7 +223,7 @@ namespace SmartHdrManager
                 bool browser = o.IncludeBrowsers && o.Browsers.Contains(name);
                 bool player = !browser && o.IncludePlayers && o.Players.Contains(name);
                 if (browser || player)
-                    _windows.Add(new WindowInfo { Hwnd = hWnd, Process = name, Title = _sb.ToString(), IsBrowser = browser });
+                    _windows.Add(new WindowInfo { Hwnd = hWnd, Pid = pid, Process = name, Title = _sb.ToString(), IsBrowser = browser });
                 return true;
             }, IntPtr.Zero);
         }

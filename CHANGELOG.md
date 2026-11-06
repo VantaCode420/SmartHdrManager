@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 2.6.2 – 2026-11
 
 ### New
 - **Battle.net games** are found automatically, with their real names (Diablo IV, Overwatch 2, Call of Duty, …). Test realms and betas are skipped.
@@ -16,6 +16,8 @@
 - **Programs that only share a game's exe name no longer switch HDR.** For a game from a launcher library, a process with the same name that runs from outside the game's install folder (two unrelated `game.exe`, a tool called like a game) is ignored, and the log says so. Folder links and junctions are followed. Process names that no library game uses, games whose location is unknown and processes whose path cannot be read are matched by name as before.
 
 ### Fixed
+- **Local HDR videos without "HDR" in the title** (mpv, MPC-HC, VLC, …) now switch HDR on. mpv shows the title stored in the file, and many files have no "HDR" in their name, so *HDR only* never switched. When the title has no HDR keyword, the app looks at the file on the player's command line: its name, and the video header (MKV/WebM and MP4/MOV: PQ or HLG transfer, HDR mastering data, Dolby Vision). Read-only, once per file. A file opened later from the player's own menu or by drag and drop is still recognised by the title only.
+- *Settings › Never HDR games* shows the right count after excluding a game with the keyboard shortcut.
 - **More launchers are recognised:** Paradox's launcher (`dowser.exe`), PlayLAN, Thief: Deadly Shadows' `runme.exe`, the FINAL FANTASY XIV and Elite Dangerous launchers and programs in a `Launcher` folder are treated as launchers, so the app watches the game they start.
 - **Games whose starter runs another exe:** the app also watches the real game exe in a subfolder when its name extends the starter's name, e.g. `HeroesOfTheStorm_x64.exe` next to `Heroes of the Storm.exe`.
 - **Installers, runtimes and helper programs are no longer taken for the game:** exes in installer folders and bundled Java runtimes (`_CommonRedist`, `Support`, `DotNetCore`, `jre`, …), .NET installers (`netfx…`), companion apps, crash watchdogs, PunkBuster, the Java runtime (`javaw.exe`) and support tools are skipped when the app looks for a game's exe. Editors, consoles, dedicated servers, debug builds and support programs are no longer watched as extra exes.
