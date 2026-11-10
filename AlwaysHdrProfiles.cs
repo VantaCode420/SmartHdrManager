@@ -41,6 +41,22 @@ namespace SmartHdrManager
 
         public static bool IsOurs(string? profile) => profile != null && profile.StartsWith("SHM_", StringComparison.OrdinalIgnoreCase);
 
+        /// <summary>
+        /// Before the mode is turned on: true when at least one HDR display has a profile in its HDR slot (normally the one
+        /// the Windows HDR Calibration app made). Read-only. <paramref name="hdrDisplays"/>: how many HDR displays there are.
+        /// </summary>
+        public static bool AnyCalibrationProfile(out int hdrDisplays)
+        {
+            hdrDisplays = 0;
+            foreach (var d in HdrController.ListDisplayTargets().Where(x => x.HdrSupported))
+            {
+                hdrDisplays++;
+                if (ColorProfileNative.GetUserScope(d.AdapterId, d.SourceId, out int scope) != 0) continue;
+                if (ColorProfileNative.GetDefault(scope, d.AdapterId, d.SourceId, ColorProfileNative.SubtypeHdr, out _) != null) return true;
+            }
+            return false;
+        }
+
         private static List<DisplayRecord> Load()
         {
             try

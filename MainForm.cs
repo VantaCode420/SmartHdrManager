@@ -82,7 +82,7 @@ namespace SmartHdrManager
         private const string KeepDesktopText = "Also switch back HDR that you or other programs turned on.";
 
         private static string AlwaysHdrDefaultText => HdrEngine.AlwaysHdrSupported
-            ? "Switch on your HDR games in the Games tab – others keep the correction."
+            ? "Needs a Windows HDR Calibration profile (Microsoft Store). Switch on your HDR games in the Games tab."
             : "Needs Windows 11: this Windows does not have the colour-profile functions.";
         private readonly ToggleSwitch _swAutoUpdate = new();
         private ModernButton? _checkUpdatesButton;
@@ -566,6 +566,43 @@ namespace SmartHdrManager
             UpdateAlwaysHdrSettings(false);
         }
 
+        /// <summary>
+        /// Always-HDR builds on the profile the Windows HDR Calibration app makes. Without one the mode can't correct
+        /// anything, so it is not turned on: the user is told how to make one, and the Microsoft Store can be opened.
+        /// </summary>
+        private bool CheckCalibrationProfile()
+        {
+            if (AlwaysHdrProfiles.AnyCalibrationProfile(out int hdrDisplays)) return true;
+            if (hdrDisplays == 0)
+            {
+                MessageBox.Show(this, "No HDR display was found. Always-HDR needs a monitor with HDR available in Windows Settings › Display.",
+                                Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return false;
+            }
+            var answer = MessageBox.Show(this,
+                "Always-HDR needs a Windows HDR Calibration profile, and your HDR display doesn't have one yet.\n\n" +
+                "1. Install the free \"Windows HDR Calibration\" app from the Microsoft Store.\n" +
+                "2. Turn HDR on (Win+Alt+B) and run it once.\n" +
+                "3. Then turn Always-HDR on here.\n\n" +
+                "Open the Microsoft Store now?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (answer == DialogResult.Yes) OpenHdrCalibrationInStore();
+            return false;
+        }
+
+        private static void OpenHdrCalibrationInStore()
+        {
+            foreach (string uri in new[] { "ms-windows-store://search/?query=Windows%20HDR%20Calibration",
+                                           "https://apps.microsoft.com/search?query=Windows+HDR+Calibration" })
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(uri) { UseShellExecute = true })?.Dispose();
+                    return;
+                }
+                catch { }
+            }
+        }
+
         /// <summary>Settings that do nothing in the current mode are greyed out, and the texts say what applies.</summary>
         private void UpdateAlwaysHdrSettings(bool alwaysOn)
         {
@@ -787,6 +824,13 @@ namespace SmartHdrManager
             {
                 if (_loadingSettings) return;
                 bool on = _swAlwaysHdr.Checked;
+                if (on && !CheckCalibrationProfile())
+                {
+                    _loadingSettings = true;
+                    try { _swAlwaysHdr.Checked = false; }
+                    finally { _loadingSettings = false; }
+                    return;
+                }
                 if (on && MessageBox.Show(this,
                         "Always-HDR keeps Windows HDR on and switches colour profiles: SDR content gets a gamma 2.2 correction, " +
                         "HDR content your own calibration only.\n\n" +
