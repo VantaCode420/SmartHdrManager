@@ -437,6 +437,14 @@ namespace SmartHdrManager
         [STAThread]
         private static void Main(string[] args)
         {
+            // Hidden Always-HDR test commands: their own small process, independent of a running tray copy
+            int labIndex = Array.FindIndex(args, a => a.Equals("--hdr-lab", StringComparison.OrdinalIgnoreCase));
+            if (labIndex >= 0)
+            {
+                Environment.ExitCode = AlwaysHdrLab.Run(args, labIndex);
+                return;
+            }
+
             // "Launch with HDR": SmartHdrManager.exe --launch <game> [arguments] – starts a game with HDR already on.
             // Runs as its own small process (no window, no tray icon) and exits when the game has closed.
             int launchIndex = Array.FindIndex(args, a => a.Equals("--launch", StringComparison.OrdinalIgnoreCase) ||

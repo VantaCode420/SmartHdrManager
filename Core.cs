@@ -563,6 +563,7 @@ namespace SmartHdrManager
             GET_SOURCE_NAME = 1,
             GET_TARGET_NAME = 2,
             GET_ADVANCED_COLOR_INFO = 9,
+            GET_SDR_WHITE_LEVEL = 11,
             GET_ADVANCED_COLOR_INFO_2 = 15,   // Windows 11 24H2+
             SET_HDR_STATE = 16,               // Windows 11 24H2+
             SET_ADVANCED_COLOR_STATE = 10
@@ -1143,6 +1144,67 @@ namespace SmartHdrManager
                     : "HDR could not be switched";
             }
             return success && !anyFailed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DISPLAYCONFIG_SDR_WHITE_LEVEL
+        {
+            public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+            public uint sdrWhiteLevel;       // nits = value / 1000 * 80
+        }
+
+        [DllImport("user32.dll")] private static extern int DisplayConfigGetDeviceInfo(ref DISPLAYCONFIG_SDR_WHITE_LEVEL requestPacket);
+
+        /// <summary>SDR white level of a display in nits (the SDR brightness slider), or null when Windows does not report it.</summary>
+        private static double? GetSdrWhiteNits(LUID adapterId, uint targetId)
+        {
+            var request = new DISPLAYCONFIG_SDR_WHITE_LEVEL();
+            request.header.type = DISPLAYCONFIG_DEVICE_INFO_TYPE.GET_SDR_WHITE_LEVEL;
+            request.header.size = (uint)Marshal.SizeOf<DISPLAYCONFIG_SDR_WHITE_LEVEL>();
+            request.header.adapterId = adapterId;
+            request.header.id = targetId;
+            return DisplayConfigGetDeviceInfo(ref request) == ERROR_SUCCESS ? request.sdrWhiteLevel / 1000.0 * 80.0 : null;
+        }
+
+        /// <summary>One active display with the ids the Windows colour-profile functions need (one entry per monitor).</summary>
+        public sealed class DisplayTarget
+        {
+            public string DevicePath { get; init; } = string.Empty;   // stable key: adapter ids can change between boots
+            public string Name { get; init; } = string.Empty;
+            public LUID AdapterId { get; init; }
+            public uint SourceId { get; init; }
+            public uint TargetId { get; init; }
+            public bool IsPrimary { get; init; }
+            public bool HdrSupported { get; init; }
+            public bool HdrEnabled { get; init; }
+            public double? SdrWhiteNits { get; init; }
+        }
+
+        public static List<DisplayTarget> ListDisplayTargets()
+        {
+            var result = new List<DisplayTarget>();
+            if (QueryActivePaths(out var paths, out var modes) != ERROR_SUCCESS) return result;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in paths)
+            {
+                string key = MonitorKey(path);
+                if (!seen.Add(key)) continue;
+                var (name, _) = GetTargetName(path.targetInfo.adapterId, path.targetInfo.id);
+                bool ok = TryGetHdrState(path.targetInfo.adapterId, path.targetInfo.id, out bool supported, out bool enabled);
+                result.Add(new DisplayTarget
+                {
+                    DevicePath = key,
+                    Name = string.IsNullOrWhiteSpace(name) ? GetSourceGdiName(path) : name.Trim(),
+                    AdapterId = path.sourceInfo.adapterId,
+                    SourceId = path.sourceInfo.id,
+                    TargetId = path.targetInfo.id,
+                    IsPrimary = IsPrimaryDisplayPath(path, modes),
+                    HdrSupported = ok && supported,
+                    HdrEnabled = ok && enabled,
+                    SdrWhiteNits = GetSdrWhiteNits(path.targetInfo.adapterId, path.targetInfo.id)
+                });
+            }
+            return result;
         }
 
         public static bool IsHdrCurrentlyEnabled(bool onlyPrimaryMonitor)

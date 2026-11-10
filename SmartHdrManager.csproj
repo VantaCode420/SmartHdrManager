@@ -31,6 +31,13 @@
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
+  <!-- The unit tests are their own project: never compiled into the app -->
+  <ItemGroup>
+    <Compile Remove="tests\**" />
+    <EmbeddedResource Remove="tests\**" />
+    <None Remove="tests\**" />
+  </ItemGroup>
+
   <!-- "Check for updates" picks the package that fits this copy: standalone (self-contained) or the small one -->
   <ItemGroup>
     <AssemblyMetadata Include="BuildFlavor" Value="standalone" Condition="'$(SelfContained)' == 'true'" />
