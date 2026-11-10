@@ -16,6 +16,7 @@ namespace SmartHdrManager
     {
         public bool HdrOn { get; init; }
         public bool Paused { get; init; }
+        public bool AlwaysHdr { get; init; }                   // Always-HDR mode: HdrOn means "HDR content, correction off"
         public string ActiveProcess { get; init; } = string.Empty;
         public bool IsFullscreen { get; init; }
         public string? RunningGame { get; init; }
@@ -51,7 +52,7 @@ namespace SmartHdrManager
     /// The process list is scanned once per second and the display HDR state is read every 2 seconds,
     /// or immediately after a switch, a display change or resume from sleep.
     /// </summary>
-    public sealed class HdrEngine
+    public sealed partial class HdrEngine
     {
         /// <summary>Old location (next to the exe). Not writable when the app is installed in "Program Files".</summary>
         public static readonly string LegacyConfigPath = Path.Combine(AppContext.BaseDirectory, "config.json");
@@ -130,6 +131,7 @@ namespace SmartHdrManager
             public readonly HashSet<string> AllVideoApps;   // browsers + players, also the ones set to "don't touch HDR"
             public readonly HashSet<string> HdrOnlyApps;    // browsers / players set to "only HDR videos"
             public readonly bool KeepDesktopSdr;            // 2.5 behaviour: also switch back HDR the app did not turn on
+            public readonly bool AlwaysHdr;                 // Always-HDR mode on (and possible on this Windows)
             // HDR library games whose exe location is known: process name -> the game's install folder(s) and exe(s). A
             // process with the same name that runs from somewhere else is another program (e.g. two unrelated "game.exe").
             public readonly Dictionary<string, (string[] Folders, string[] Exes)> GameFolders;
@@ -185,6 +187,7 @@ namespace SmartHdrManager
                     }
                 }
                 KeepDesktopSdr = c.KeepDesktopSdr;
+                AlwaysHdr = c.AlwaysHdrMode && AlwaysHdrSupported;
 
                 VideoKeywords = (c.HdrVideoKeywords ?? new List<string>()).Where(k => !string.IsNullOrWhiteSpace(k)).ToArray();
                 BrowserToken = string.IsNullOrWhiteSpace(c.BrowserRealHdrToken) ? string.Empty : c.BrowserRealHdrToken;
@@ -1134,7 +1137,11 @@ namespace SmartHdrManager
             _wake.Set();
             bool finished = true;
             try { finished = _thread == null || _thread.Join(2000); } catch { }
-            if (finished) RestoreSdrOnExit();   // never while the engine thread might still switch
+            if (finished)   // never while the engine thread might still switch
+            {
+                if (_alwaysActive) ExitAlwaysHdr();
+                else RestoreSdrOnExit();
+            }
             lock (Sync) Save();
         }
 
@@ -1203,6 +1210,7 @@ namespace SmartHdrManager
             if (resumed || MonitorsChanged()) Interlocked.Exchange(ref _displayEventMs, Now);
             Interlocked.Exchange(ref _forceHdrQuery, 1);
             Interlocked.Exchange(ref _displaysChanged, 1);   // video windows may now be on another display
+            Interlocked.Exchange(ref _alwaysReapply, resumed ? 2 : 1);   // Always-HDR: check the profiles (after standby: set them again)
             _wake.Set();
         }
 
@@ -1348,10 +1356,14 @@ namespace SmartHdrManager
             else if (mode != HdrOverride.None)
                 ApplyOverride(s, now, mode);
 
+            try { MaintainAlwaysHdr(s, now, mode); }
+            catch (Exception ex) { Log("ERROR", $"Always-HDR: {ex.Message}"); }
+
             Status = new EngineStatus
             {
                 HdrOn = _hdrAny,
                 Paused = Paused,
+                AlwaysHdr = _alwaysActive,
                 ActiveProcess = procName,
                 IsFullscreen = isFullscreen,
                 RunningGame = _runningGame,
@@ -1388,8 +1400,8 @@ namespace SmartHdrManager
             if (!forced && now < _nextHdrQueryMs && ReferenceEquals(_queriedMonitors, target))
                 return;
 
-            // Keep the last known state if Windows could not be queried
-            if (HdrController.QueryHdrState(target, out bool any, out bool all))
+            // Keep the last known state if Windows could not be queried. Always-HDR: "on" means "correction off".
+            if (QueryHdr(s, target, out bool any, out bool all))
             {
                 if (!_apiLogged && HdrController.HdrApiName != "not determined yet")
                 {
@@ -2794,13 +2806,14 @@ namespace SmartHdrManager
             Log("HDR", $"Turning HDR ON ({monitors.Describe()}) – {reason}");
 
             CancelColorProfileReload();   // a reload must not run while we are going back into HDR
-            if (!_hdrAny)
+            bool always = AlwaysHdrRunning;
+            if (!_hdrAny && !always)
             {
                 // Remember how the displays looked in SDR, to check (and repair) them after switching back
                 try { _sdrBaseline = HdrController.CaptureColorState(monitors); }
                 catch { _sdrBaseline = null; }
             }
-            bool ok = HdrController.SetHdrState(true, monitors);
+            bool ok = always ? SetCorrection(monitors, correctionOff: true, reason) : HdrController.SetHdrState(true, monitors);
             if (ok)
             {
                 if (!_hdrAny || _hdrOnSinceMs == 0) _hdrOnSinceMs = now;
@@ -2825,7 +2838,8 @@ namespace SmartHdrManager
             _lastAttemptMs = now;
             Log("SDR", $"Switching to SDR ({monitors.Describe()}) – {reason}");
 
-            bool ok = HdrController.SetHdrState(false, monitors);
+            bool always = AlwaysHdrRunning;
+            bool ok = always ? SetCorrection(monitors, correctionOff: false, reason) : HdrController.SetHdrState(false, monitors);
             if (ok)
             {
                 _hdrOnSinceMs = 0;
@@ -2841,7 +2855,7 @@ namespace SmartHdrManager
                 _verifyAllOn = false;
                 var snapshot = GetSnapshot();
                 var baseline = _sdrBaseline;
-                if (reloadProfile || snapshot.RefreshApps || baseline != null)
+                if (!always && (reloadProfile || snapshot.RefreshApps || baseline != null))
                     SchedulePostSdrFixes(monitors, reloadProfile, snapshot.RefreshApps, snapshot.Browsers, baseline);
             }
             else

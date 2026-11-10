@@ -71,6 +71,14 @@ namespace SmartHdrManager
         private readonly ToggleSwitch _swColorProfile = new();
         private readonly ToggleSwitch _swRefreshApps = new();
         private readonly ToggleSwitch _swKeepDesktopSdr = new();
+        private readonly ToggleSwitch _swAlwaysHdr = new();
+        private readonly ToggleSwitch _swAlwaysKeepHdr = new();
+        private Label? _alwaysHdrDesc;
+        private bool _lastAlwaysHdr;
+
+        private static string AlwaysHdrDefaultText => HdrEngine.AlwaysHdrSupported
+            ? "Switch on your HDR games in the Games tab – others keep the correction."
+            : "Needs Windows 11: this Windows does not have the colour-profile functions.";
         private readonly ToggleSwitch _swAutoUpdate = new();
         private ModernButton? _checkUpdatesButton;
         private Label? _updateDesc;
@@ -477,6 +485,18 @@ namespace SmartHdrManager
             });
             Detail(videoCard, 84);
 
+            // ---- Always-HDR ----
+            Section("Always-HDR (experimental)", "HDR stays on. SDR content gets a gamma 2.2 correction, HDR content your calibration only.");
+            var alwaysRow = SettingRow("Always-HDR", AlwaysHdrDefaultText, _swAlwaysHdr);
+            _alwaysHdrDesc = RowDescription(alwaysRow);
+            _swAlwaysHdr.Enabled = HdrEngine.AlwaysHdrSupported;
+            Add(alwaysRow, 68);
+            Add(SettingRow("Keep HDR on when the app exits", "Off: HDR goes back to how it was before the mode started.", _swAlwaysKeepHdr), 68);
+            var removeAlways = new ModernButton { Text = "Remove", AutoSize = true };
+            _toolTip.SetToolTip(removeAlways, "Switches Always-HDR off, puts your calibration profile back and removes every colour profile it created");
+            removeAlways.Click += (_, _) => OnRemoveAlwaysHdr();
+            Add(SettingRow("Remove Always-HDR profiles", "Turns the mode off and removes every colour profile it created.", removeAlways), 68);
+
             // ---- Display fixes ----
             Section("Display fixes", "Repairs side effects of leaving HDR.");
             Add(SettingRow("Reload color profile", "Re-applies your calibration after HDR (may need admin rights).", _swColorProfile), 68);
@@ -514,6 +534,26 @@ namespace SmartHdrManager
 
             page.RowStyles.Add(new RowStyle(SizeType.AutoSize));   // filler
             return page;
+        }
+
+        /// <summary>Always-HDR row: the mode's current state while it runs, otherwise the hint.</summary>
+        private void UpdateAlwaysHdrDescription(bool active)
+        {
+            if (_alwaysHdrDesc == null || _alwaysHdrDesc.IsDisposed) return;
+            string status = _engine.AlwaysHdrStatus;
+            string text = active && status.Length > 0 ? status : AlwaysHdrDefaultText;
+            if (_alwaysHdrDesc.Text != text) _alwaysHdrDesc.Text = text;
+        }
+
+        private void OnRemoveAlwaysHdr()
+        {
+            if (MessageBox.Show(this, "Turn Always-HDR off, put your calibration profile back and remove every colour profile " +
+                                      "Always-HDR created?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            _engine.RemoveAlwaysHdr();
+            _loadingSettings = true;
+            try { _swAlwaysHdr.Checked = false; }
+            finally { _loadingSettings = false; }
         }
 
         private static Label SectionDescription(string text) => new()
@@ -722,6 +762,26 @@ namespace SmartHdrManager
             _swKeepBrowserHdr.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.KeepBrowserHdrWhenNotFocused = _swKeepBrowserHdr.Checked); };
             _swColorProfile.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.ReloadColorProfileAfterSdr = _swColorProfile.Checked); };
             _swRefreshApps.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.RefreshAppsAfterSdr = _swRefreshApps.Checked); };
+            _swAlwaysKeepHdr.CheckedChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.AlwaysHdrKeepHdrOnExit = _swAlwaysKeepHdr.Checked); };
+            _swAlwaysHdr.CheckedChanged += (_, _) =>
+            {
+                if (_loadingSettings) return;
+                bool on = _swAlwaysHdr.Checked;
+                if (on && MessageBox.Show(this,
+                        "Always-HDR keeps Windows HDR on and switches colour profiles: SDR content gets a gamma 2.2 correction, " +
+                        "HDR content your own calibration only.\n\n" +
+                        "Switch on your HDR games in the Games tab. An HDR game that is not switched on there keeps the correction " +
+                        "and its shadows look too dark.\n\n" +
+                        "OLED monitors: a permanent HDR desktop can dim large bright windows and wears the panel faster.\n\n" +
+                        "Turn Always-HDR on?", Text, MessageBoxButtons.YesNo, MessageBoxIcon.Information) != DialogResult.Yes)
+                {
+                    _loadingSettings = true;
+                    try { _swAlwaysHdr.Checked = false; }
+                    finally { _loadingSettings = false; }
+                    return;
+                }
+                _engine.Update(c => c.AlwaysHdrMode = on);
+            };
             _fallback.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.SdrFallbackDelaySeconds = _fallback.Value); };
 
             _swVideoAuto.CheckedChanged += (_, _) =>
@@ -851,12 +911,14 @@ namespace SmartHdrManager
         {
             var s = _engine.Status;
             UpdateScriptStatus();
+            UpdateAlwaysHdrDescription(s.AlwaysHdr);
 
             // Visual state: 0 off, 1 on, 2 paused; +10 / +20 while a manual override (HDR / SDR) is active
             int state = (s.Paused && s.Override == HdrOverride.None ? 2 : s.HdrOn ? 1 : 0) + (int)s.Override * 10;
-            if (state != _lastState)
+            if (state != _lastState || s.AlwaysHdr != _lastAlwaysHdr)
             {
                 _lastState = state;
+                _lastAlwaysHdr = s.AlwaysHdr;
 
                 _statusCard.SetState(state == 2 ? HdrVisualState.Paused : s.HdrOn ? HdrVisualState.On : HdrVisualState.Off);
                 _hdrLabel.Text = s.Override switch
@@ -864,6 +926,7 @@ namespace SmartHdrManager
                     HdrOverride.ForceHdr => "HDR forced on",
                     HdrOverride.ForceSdr => "SDR forced",
                     _ => state == 2 ? (s.HdrOn ? "HDR on · paused" : "Automation paused")
+                         : s.AlwaysHdr ? (s.HdrOn ? "HDR content · no correction" : "Always-HDR · SDR corrected")
                          : s.HdrOn ? "HDR is on" : "HDR is off"
                 };
 
@@ -2008,6 +2071,8 @@ namespace SmartHdrManager
                 _swRefreshApps.Checked = _engine.Read(c => c.RefreshAppsAfterSdr);
                 _fallback.Value = _engine.Read(c => c.SdrFallbackDelaySeconds);
                 _swKeepDesktopSdr.Checked = _engine.Read(c => c.KeepDesktopSdr);
+                _swAlwaysHdr.Checked = HdrEngine.AlwaysHdrSupported && _engine.Read(c => c.AlwaysHdrMode);
+                _swAlwaysKeepHdr.Checked = _engine.Read(c => c.AlwaysHdrKeepHdrOnExit);
                 _swAutoUpdate.Checked = _engine.Read(c => c.CheckForUpdatesAutomatically);
 
                 _swVideoAuto.Checked = _engine.Read(c => c.VideoHdrAutomation);

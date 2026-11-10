@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Always-HDR mode (experimental, Windows 11).** *Settings › Always-HDR*: Windows HDR stays on, and the app fixes how Windows shows SDR content in HDR (washed-out shadows, because Windows decodes SDR with the sRGB curve while nearly all SDR content is made for gamma 2.2). It generates a copy of your Windows HDR Calibration profile with a gamma 2.2 correction for your current SDR brightness, and switches each display between that copy (desktop, browser, SDR games) and your unchanged calibration (HDR content). Everything that switches HDR on in the normal mode – games switched on in the Games tab, RenoDX games, HDR video, the tray's "HDR on" – turns the correction off instead, with no black screen. Apps set to SDR, recording apps set to "No HDR" and the tray's "SDR" really turn HDR off, as before. The correction follows the SDR brightness slider. Pause leaves the correction on. When the app exits, your calibration profile goes back; *Keep HDR on when the app exits* decides whether HDR stays on. *Remove Always-HDR profiles* turns the mode off and removes everything it created. The app can't see whether a game outputs HDR: switch your HDR games on in the Games tab, otherwise they keep the correction and look too dark in the shadows. Needs a Windows HDR Calibration profile on the display. No administrator rights needed; only profiles named `SHM_*` are created or removed. Off by default – with it off, nothing changes.
+
 ## 2.7.0 – 2026-11
 
 ### New

@@ -235,7 +235,9 @@ namespace SmartHdrManager
             var s = _engine.Status;
             string state = s.Override == HdrOverride.ForceHdr ? "HDR forced on"
                 : s.Override == HdrOverride.ForceSdr ? "SDR forced"
-                : s.Paused ? "paused" : s.HdrOn ? "HDR on" : "HDR off";
+                : s.Paused ? "paused"
+                : s.AlwaysHdr ? (s.HdrOn ? "HDR content" : "Always-HDR, SDR corrected")
+                : s.HdrOn ? "HDR on" : "HDR off";
             string tooltip = $"Smart HDR Manager – {state}";
             if (tooltip != _lastTooltip)
             {

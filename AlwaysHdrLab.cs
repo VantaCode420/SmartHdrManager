@@ -129,175 +129,50 @@ namespace SmartHdrManager
         }
 
         // ------------------------------------------------------------------
-        // Apply / toggle / restore. The original state is saved before anything changes, and restore works from that
-        // file alone, so it also works after a crash.
+        // Apply / toggle / restore, through the same code the Always-HDR mode uses (AlwaysHdrProfiles). The original
+        // state is saved before anything changes, and restore works from that file alone, also after a crash.
         // ------------------------------------------------------------------
-        private const double Gamma = 2.2;
-        private static readonly string StatePath = Path.Combine(ColorProfileLog.Folder, "always-hdr-state.json");
-        private static readonly string ProfileFolder = Path.Combine(ColorProfileLog.Folder, "profiles");
-
-        private sealed class DisplayRecord
+        private static List<HdrController.DisplayTarget> HdrDisplays(List<string> report)
         {
-            public string DevicePath { get; set; } = string.Empty;
-            public int Scope { get; set; }
-            public string? OriginalDefault { get; set; }
-            public List<string> Generated { get; set; } = new();
-        }
-
-        private sealed class Prepared
-        {
-            public HdrController.DisplayTarget Display = null!;
-            public DisplayRecord Record = null!;
-            public string Corrected = string.Empty;
-        }
-
-        private static List<DisplayRecord> LoadState()
-        {
-            if (!File.Exists(StatePath)) return new List<DisplayRecord>();
-            return JsonSerializer.Deserialize<List<DisplayRecord>>(File.ReadAllText(StatePath)) ?? new List<DisplayRecord>();
-        }
-
-        private static void SaveState(List<DisplayRecord> state)
-        {
-            Directory.CreateDirectory(ColorProfileLog.Folder);
-            if (state.Count == 0) { File.Delete(StatePath); return; }
-            string temp = StatePath + ".tmp";
-            File.WriteAllText(temp, JsonSerializer.Serialize(state, new JsonSerializerOptions { WriteIndented = true }));
-            File.Move(temp, StatePath, overwrite: true);
-        }
-
-        private static string Short(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8];
-
-        /// <summary>Generates, installs and associates the corrected profile of every display that has HDR on.</summary>
-        private static List<Prepared> PrepareAll(List<DisplayRecord> state, List<string> report)
-        {
-            var prepared = new List<Prepared>();
             if (!ColorProfileNative.IsAvailable(out string missing))
             {
                 report.Add($"This version of Windows does not have the colour-profile functions ({missing}).");
-                return prepared;
+                return new List<HdrController.DisplayTarget>();
             }
-            string? colorDir = ColorProfileNative.GetColorDirectory();
-            if (colorDir == null) { report.Add("Windows did not report its colour folder."); return prepared; }
-
-            foreach (var d in HdrController.ListDisplayTargets())
-            {
-                try
-                {
-                    if (!d.HdrEnabled) { report.Add($"{d.Name}: HDR is off, skipped. Turn HDR on first."); continue; }
-                    double white = d.SdrWhiteNits ?? 0;
-                    if (white <= 0) { report.Add($"{d.Name}: SDR white level unknown, skipped."); continue; }
-
-                    int hr = ColorProfileNative.GetUserScope(d.AdapterId, d.SourceId, out int scope);
-                    if (hr != 0) { report.Add($"{d.Name}: could not read the profile scope (0x{hr:X8})."); continue; }
-
-                    var record = state.FirstOrDefault(r => r.DevicePath.Equals(d.DevicePath, StringComparison.OrdinalIgnoreCase));
-                    if (record == null)
-                    {
-                        string? current = ColorProfileNative.GetDefault(scope, d.AdapterId, d.SourceId, ColorProfileNative.SubtypeHdr, out _);
-                        if (current == null) { report.Add($"{d.Name}: no calibration profile in the HDR slot; this test needs one."); continue; }
-                        if (current.StartsWith("SHM_", StringComparison.OrdinalIgnoreCase)) { report.Add($"{d.Name}: the default is already '{current}' but no saved state exists; not touching it."); continue; }
-                        record = new DisplayRecord { DevicePath = d.DevicePath, Scope = scope, OriginalDefault = current };
-                        state.Add(record);
-                        SaveState(state);   // before anything changes
-                        ColorProfileLog.Write($"Saved original state: {d.DevicePath} scope={scope} default='{current}'");
-                    }
-
-                    byte[] calibration = File.ReadAllBytes(Path.Combine(colorDir, record.OriginalDefault!));
-                    string name = $"SHM_{Short(d.DevicePath)}_{Short(record.OriginalDefault!)}{Convert.ToHexString(SHA256.HashData(calibration))[..4]}_W{Math.Round(white)}_g22.icm";
-                    byte[] corrected = CorrectedProfile.FromCalibration(calibration, white, Gamma, $"SHM gamma 2.2 at {Math.Round(white)} nits");
-                    Directory.CreateDirectory(ProfileFolder);
-                    string path = Path.Combine(ProfileFolder, name);
-                    File.WriteAllBytes(path, corrected);
-                    ColorProfileLog.Write($"Generated '{name}': {corrected.Length} bytes, W={white:0.0} nits, base '{record.OriginalDefault}'");
-
-                    if (!record.Generated.Contains(name, StringComparer.OrdinalIgnoreCase))
-                    {
-                        record.Generated.Add(name);
-                        SaveState(state);
-                    }
-
-                    int error = ColorProfileNative.Install(path);
-                    if (error != 0) { report.Add($"{d.Name}: installing the profile failed: {new System.ComponentModel.Win32Exception(error).Message} ({error})."); continue; }
-                    hr = ColorProfileNative.AddAssociation(record.Scope, name, d.AdapterId, d.SourceId);
-                    if (hr != 0) { report.Add($"{d.Name}: associating the profile failed (0x{hr:X8})."); continue; }
-                    prepared.Add(new Prepared { Display = d, Record = record, Corrected = name });
-                }
-                catch (Exception ex)
-                {
-                    ColorProfileLog.Write($"{d.Name}: preparing failed: {ex}");
-                    report.Add($"{d.Name}: {ex.Message}");
-                }
-            }
-            return prepared;
+            var displays = HdrController.ListDisplayTargets().Where(d => d.HdrSupported).ToList();
+            foreach (var d in displays.Where(d => !d.HdrEnabled)) report.Add($"{d.Name}: HDR is off, skipped. Turn HDR on first.");
+            return displays.Where(d => d.HdrEnabled).ToList();
         }
 
-        /// <summary>Sets the HDR-slot default and reads it back. Reading it back does not prove the screen changed.</summary>
-        private static bool Switch(Prepared p, string profile, List<string>? report)
+        private static bool ApplyAll(AlwaysHdrProfiles profiles, List<HdrController.DisplayTarget> displays, bool corrected, List<string> report)
         {
-            var timer = System.Diagnostics.Stopwatch.StartNew();
-            int hr = ColorProfileNative.SetDefault(p.Record.Scope, profile, p.Display.AdapterId, p.Display.SourceId);
-            string? now = ColorProfileNative.GetDefault(p.Record.Scope, p.Display.AdapterId, p.Display.SourceId, ColorProfileNative.SubtypeHdr, out _);
-            bool ok = hr == 0 && string.Equals(now, profile, StringComparison.OrdinalIgnoreCase);
-            ColorProfileLog.Write($"SWITCH {p.Display.Name} -> '{profile}' in {timer.ElapsedMilliseconds} ms, read back '{now}', {(ok ? "OK" : "FAILED")}");
-            if (!ok) report?.Add($"{p.Display.Name}: switching to '{profile}' failed (0x{hr:X8}, read back '{now}').");
-            return ok;
+            bool all = true;
+            foreach (var d in displays)
+            {
+                bool ok = profiles.Apply(d, corrected, d.SdrWhiteNits ?? 0, force: false, trigger: "lab");
+                if (profiles.Problems.TryGetValue(d.DevicePath, out string? problem)) report.Add($"{d.Name}: {problem}");
+                all &= ok;
+            }
+            return all;
         }
 
         private static int Apply()
         {
-            var state = LoadState();
             var report = new List<string>();
-            int applied = 0;
-            foreach (var p in PrepareAll(state, report))
-            {
-                if (Switch(p, p.Corrected, report))
-                {
-                    applied++;
-                    report.Add($"{p.Display.Name}: corrected profile active ({p.Corrected}).");
-                }
-                else if (p.Record.OriginalDefault != null)
-                {
-                    Switch(p, p.Record.OriginalDefault, report);
-                }
-            }
-            Show($"{string.Join("\n", report)}\n\nUse --hdr-lab restore to go back.", applied > 0);
-            return applied > 0 ? 0 : 1;
+            var profiles = new AlwaysHdrProfiles();
+            var displays = HdrDisplays(report);
+            bool ok = displays.Count > 0 && ApplyAll(profiles, displays, corrected: true, report);
+            if (ok) report.AddRange(displays.Select(d => $"{d.Name}: corrected profile active at {d.SdrWhiteNits:0} nits."));
+            Show($"{string.Join("\n", report)}\n\nUse --hdr-lab restore to go back.", ok);
+            return ok ? 0 : 1;
         }
 
         private static int RestoreAll(bool showResult)
         {
-            var state = LoadState();
-            var report = new List<string>();
-            if (state.Count == 0) report.Add("Nothing to restore: no saved state.");
-            var displays = HdrController.ListDisplayTargets();
-            foreach (var record in state.ToList())
-            {
-                var d = displays.FirstOrDefault(x => x.DevicePath.Equals(record.DevicePath, StringComparison.OrdinalIgnoreCase));
-                if (d == null) { report.Add($"{record.DevicePath}: not connected, kept for later."); continue; }
-
-                bool ok = true;
-                if (record.OriginalDefault != null)
-                {
-                    ok = ColorProfileNative.SetDefault(record.Scope, record.OriginalDefault, d.AdapterId, d.SourceId) == 0;
-                    string? now = ColorProfileNative.GetDefault(record.Scope, d.AdapterId, d.SourceId, ColorProfileNative.SubtypeHdr, out _);
-                    ok &= string.Equals(now, record.OriginalDefault, StringComparison.OrdinalIgnoreCase);
-                    report.Add($"{d.Name}: {(ok ? "restored" : "could NOT restore")} '{record.OriginalDefault}' (now '{now}').");
-                }
-                if (!ok) continue;   // keep the record so that restore can be tried again
-
-                foreach (string name in record.Generated.Where(n => n.StartsWith("SHM_", StringComparison.OrdinalIgnoreCase)))
-                {
-                    ColorProfileNative.RemoveAssociation(record.Scope, name, d.AdapterId, d.SourceId);
-                    ColorProfileNative.Uninstall(name);
-                    try { File.Delete(Path.Combine(ProfileFolder, name)); } catch { }
-                }
-                state.Remove(record);
-            }
-            SaveState(state);
-            ColorProfileLog.Write("Restore: " + string.Join(" | ", report));
-            if (showResult) Show(string.Join("\n", report), true);
-            return state.Count == 0 ? 0 : 1;
+            var profiles = new AlwaysHdrProfiles();
+            var report = profiles.RemoveAll(HdrController.ListDisplayTargets());
+            if (showResult) Show(string.Join("\n", report), !profiles.HasSavedState);
+            return profiles.HasSavedState ? 1 : 0;
         }
 
         private static void Show(string text, bool ok) =>
@@ -309,18 +184,16 @@ namespace SmartHdrManager
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            var state = LoadState();
             var report = new List<string>();
-            var prepared = PrepareAll(state, report);
-            if (prepared.Count == 0)
+            var displays = HdrDisplays(report);
+            if (displays.Count == 0)
             {
                 Show(string.Join("\n", report) + "\n\nNothing was changed.", false);
-                RestoreAll(showResult: false);
                 return 1;
             }
 
-            using var form = new ToggleForm(prepared, seconds, report);
-            Application.Run(form);
+            using (var form = new ToggleForm(new AlwaysHdrProfiles(), displays, seconds))
+                Application.Run(form);
             return RestoreAll(showResult: true);
         }
 
@@ -328,17 +201,17 @@ namespace SmartHdrManager
         private sealed class ToggleForm : Form
         {
             private static readonly int[] Levels = { 0, 2, 4, 6, 8, 10, 13, 15, 18, 20, 23, 26, 38, 51, 77, 128 };
-            private readonly List<Prepared> _displays;
-            private readonly List<string> _report;
+            private readonly AlwaysHdrProfiles _profiles;
+            private readonly List<HdrController.DisplayTarget> _displays;
             private readonly System.Windows.Forms.Timer _timer = new();
             private bool _corrected;
             private int _switches;
             private string _state = "Starting …";
 
-            public ToggleForm(List<Prepared> displays, int seconds, List<string> report)
+            public ToggleForm(AlwaysHdrProfiles profiles, List<HdrController.DisplayTarget> displays, int seconds)
             {
+                _profiles = profiles;
                 _displays = displays;
-                _report = report;
                 Text = "Always-HDR colour test – close this window to stop and restore";
                 BackColor = Color.Black;
                 ForeColor = Color.White;
@@ -354,11 +227,11 @@ namespace SmartHdrManager
             private void Flip()
             {
                 _corrected = !_corrected;
-                bool all = true;
-                foreach (var p in _displays) all &= Switch(p, _corrected ? p.Corrected : p.Record.OriginalDefault!, _report);
+                var report = new List<string>();
+                bool all = ApplyAll(_profiles, _displays, _corrected, report);
                 _switches++;
                 _state = (_corrected ? "CORRECTED  (gamma 2.2)" : "CALIBRATION ONLY") + (all ? string.Empty : "  –  A SWITCH FAILED, see the log");
-                ColorProfileLog.Write($"TOGGLE #{_switches}: {_state}");
+                ColorProfileLog.Write($"TOGGLE #{_switches}: {_state} {string.Join(" | ", report)}");
                 Invalidate();
             }
 

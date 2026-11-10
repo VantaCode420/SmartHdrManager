@@ -95,6 +95,17 @@ Some games only check whether Windows HDR is on at the moment they start, and hi
 - If you move the app folder, copy the launch option / create the shortcut again.
 - The program to start only ever comes from the shortcut or launch option itself – the running app never receives a path from anywhere else.
 
+### Always-HDR (experimental, Windows 11)
+
+*Settings › Always-HDR* keeps Windows HDR on all the time. With HDR on, Windows shows SDR content (desktop, browser, SDR games) with the sRGB curve, while nearly all SDR content is made for gamma 2.2 – so shadows look washed out. Always-HDR fixes that: it makes a copy of your Windows HDR Calibration profile with a gamma 2.2 correction for your current SDR brightness, and switches each display between that copy and your unchanged calibration.
+
+- **SDR content:** corrected. The correction follows the SDR brightness slider.
+- **HDR content:** your calibration only. Everything that switches HDR on in the normal mode – games switched on in the Games tab, RenoDX games, HDR videos, SDR videos with RTX Video HDR, the tray's *HDR on*, *Launch with HDR* – turns the correction off instead. No black screen, and games see HDR on from their first frame.
+- **Switch your HDR games on in the Games tab.** The app can't see whether a game outputs HDR: an HDR game that isn't switched on there keeps the correction, and its shadows look too dark.
+- **SDR apps:** creative apps set to SDR, recording apps set to *No HDR* and the tray's *SDR* really turn HDR off, as in the normal mode. Pause leaves the correction on.
+- **Exit:** your calibration profile goes back. *Keep HDR on when the app exits* decides whether HDR stays on or goes back to how it was before the mode started. **Remove Always-HDR profiles** turns the mode off and removes everything it created.
+- Needs a Windows HDR Calibration profile on the display (Microsoft Store: *Windows HDR Calibration*). No administrator rights. A switch takes about a second to show. OLED monitors: a permanent HDR desktop can dim large bright windows and wears the panel faster.
+
 <p>
   <img src="docs/settings.png" alt="Settings (part 1)" width="49%">
   <img src="docs/settings2.png" alt="Settings (part 2)" width="49%">
@@ -208,6 +219,7 @@ Settings › YouTube in browser shows **Browser script: Detected ✓** once the 
 - No telemetry, no ads, and no internet connection – except when you click **Check for updates** (or turn on the weekly check, off by default): then the app asks `api.github.com` for the latest release of this project and, if you click *Update now*, downloads it from `github.com`. Nothing about you or your PC is sent. The download is only installed if its SHA256 matches the release's `SHA256SUMS.txt`.
 - **Anti-cheat safe:** the app never reads or changes game memory and injects nothing. It only reads process names, their exe paths and window titles, like Task Manager does – and for video players their command line (which file they play), to read that file's header.
 - **Local files it reads (read-only):** the install lists of your game launchers (e.g. Steam's `appcache\appinfo.vdf`, the Amazon Games and itch.io databases) and, for HDR detection, the start of the video file a player is playing. In game folders it only looks at file names, for example to find the RenoDX add-on; no game file is opened. Nothing is changed or sent anywhere.
+- **Colour profiles (Always-HDR only):** the app reads your Windows HDR Calibration profile and installs corrected copies named `SHM_*` for your user. It never changes or deletes a profile it didn't create, and *Remove Always-HDR profiles* takes all of its own away again.
 - Some antivirus programs may be suspicious of an unsigned tray app that watches running programs and has global keyboard shortcuts. The release notes link a VirusTotal scan of exactly these files.
 - **Can the browser script make the app run code?** No. The script only changes the tab title; the app only checks whether a window title *contains* the marker text. Nothing from a title is executed or written anywhere. Any website can set any tab title anyway, so the worst a malicious script or site could do is switch HDR on. The app itself only ever starts Notepad (when you click *Open config.json / log file*), a fixed Windows colour-profile task (off by default), itself (*Start with Windows*, and the new version after *Update now*) and – with *Launch with HDR* / the Apps tab – the game or player named in your own shortcut, Steam launch option, right-click entry or "(with HDR)" app.
 - **Note:** a website can read its own tab title, so in theory it could notice the marker while a video plays and tell that the script is installed. Nothing else is exposed.
