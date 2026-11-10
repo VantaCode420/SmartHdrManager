@@ -74,7 +74,12 @@ namespace SmartHdrManager
         private readonly ToggleSwitch _swAlwaysHdr = new();
         private readonly ToggleSwitch _swAlwaysKeepHdr = new();
         private Label? _alwaysHdrDesc;
-        private bool _lastAlwaysHdr;
+        private Label? _backToSdrDesc;
+        private Label? _keepDesktopDesc;
+        private string? _lastHdrLabel;
+
+        private const string BackToSdrText = "The app only switches back HDR that it turned on. HDR you turned on stays on.";
+        private const string KeepDesktopText = "Also switch back HDR that you or other programs turned on.";
 
         private static string AlwaysHdrDefaultText => HdrEngine.AlwaysHdrSupported
             ? "Switch on your HDR games in the Games tab – others keep the correction."
@@ -454,10 +459,14 @@ namespace SmartHdrManager
             }
 
             // ---- Switching back ----
-            Section("Back to SDR", "The app only switches back HDR that it turned on. HDR you turned on stays on.");
+            Add(SectionHeader("Back to SDR"), 46);
+            _backToSdrDesc = SectionDescription(BackToSdrText);
+            Add(_backToSdrDesc, 30);
             Add(SettingRow("Wait before switching back", "After a game or video ends.", _fallback), 68);
             Add(SettingRow("Minimum time in HDR", "Fewer black screens when things start and stop quickly.", _minimumHdr), 68);
-            Add(SettingRow("Keep the desktop in SDR", "Also switch back HDR that you or other programs turned on.", _swKeepDesktopSdr), 68);
+            var keepDesktopRow = SettingRow("Keep the desktop in SDR", KeepDesktopText, _swKeepDesktopSdr);
+            _keepDesktopDesc = RowDescription(keepDesktopRow);
+            Add(keepDesktopRow, 68);
 
             // ---- YouTube & browser ----
             Section("YouTube in browser", "HDR for YouTube's HDR videos – needs the browser script (Tampermonkey).");
@@ -554,6 +563,17 @@ namespace SmartHdrManager
             _loadingSettings = true;
             try { _swAlwaysHdr.Checked = false; }
             finally { _loadingSettings = false; }
+            UpdateAlwaysHdrSettings(false);
+        }
+
+        /// <summary>Settings that do nothing in the current mode are greyed out, and the texts say what applies.</summary>
+        private void UpdateAlwaysHdrSettings(bool alwaysOn)
+        {
+            _swKeepDesktopSdr.Enabled = !alwaysOn;
+            _swAlwaysKeepHdr.Enabled = alwaysOn && HdrEngine.AlwaysHdrSupported;
+            if (_keepDesktopDesc != null) _keepDesktopDesc.Text = alwaysOn ? "Not used with Always-HDR." : KeepDesktopText;
+            if (_backToSdrDesc != null)
+                _backToSdrDesc.Text = alwaysOn ? "Always-HDR: when the correction comes back after HDR content." : BackToSdrText;
         }
 
         private static Label SectionDescription(string text) => new()
@@ -781,6 +801,7 @@ namespace SmartHdrManager
                     return;
                 }
                 _engine.Update(c => c.AlwaysHdrMode = on);
+                UpdateAlwaysHdrSettings(on);
             };
             _fallback.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.SdrFallbackDelaySeconds = _fallback.Value); };
 
@@ -913,22 +934,27 @@ namespace SmartHdrManager
             UpdateScriptStatus();
             UpdateAlwaysHdrDescription(s.AlwaysHdr);
 
-            // Visual state: 0 off, 1 on, 2 paused; +10 / +20 while a manual override (HDR / SDR) is active
-            int state = (s.Paused && s.Override == HdrOverride.None ? 2 : s.HdrOn ? 1 : 0) + (int)s.Override * 10;
-            if (state != _lastState || s.AlwaysHdr != _lastAlwaysHdr)
+            // Visual state: 0 off, 1 on, 2 paused; +10 / +20 while a manual override (HDR / SDR) is active.
+            // Always-HDR: the card shows whether Windows HDR is really on (corrected or HDR content), not the engine's view.
+            bool visualOn = s.AlwaysHdr ? s.AlwaysRealHdr : s.HdrOn;
+            int state = (s.Paused && s.Override == HdrOverride.None ? 2 : visualOn ? 1 : 0) + (int)s.Override * 10;
+            string label = s.Override switch
+            {
+                HdrOverride.ForceHdr => "HDR forced on",
+                HdrOverride.ForceSdr => "SDR forced",
+                _ => state == 2 ? (visualOn ? (s.AlwaysHdr ? "Always-HDR · paused" : "HDR on · paused") : "Automation paused")
+                     : !s.AlwaysHdr ? (s.HdrOn ? "HDR is on" : "HDR is off")
+                     : s.AlwaysSdrFor != null ? $"SDR for '{s.AlwaysSdrFor}'"
+                     : !s.AlwaysRealHdr ? "HDR is off (turned off by you)"
+                     : s.HdrOn ? "HDR content · no correction" : "Always-HDR · SDR corrected"
+            };
+            if (state != _lastState || label != _lastHdrLabel)
             {
                 _lastState = state;
-                _lastAlwaysHdr = s.AlwaysHdr;
+                _lastHdrLabel = label;
 
-                _statusCard.SetState(state == 2 ? HdrVisualState.Paused : s.HdrOn ? HdrVisualState.On : HdrVisualState.Off);
-                _hdrLabel.Text = s.Override switch
-                {
-                    HdrOverride.ForceHdr => "HDR forced on",
-                    HdrOverride.ForceSdr => "SDR forced",
-                    _ => state == 2 ? (s.HdrOn ? "HDR on · paused" : "Automation paused")
-                         : s.AlwaysHdr ? (s.HdrOn ? "HDR content · no correction" : "Always-HDR · SDR corrected")
-                         : s.HdrOn ? "HDR is on" : "HDR is off"
-                };
+                _statusCard.SetState(state == 2 ? HdrVisualState.Paused : visualOn ? HdrVisualState.On : HdrVisualState.Off);
+                _hdrLabel.Text = label;
 
                 if (s.Override != HdrOverride.None)
                 {
@@ -2073,6 +2099,7 @@ namespace SmartHdrManager
                 _swKeepDesktopSdr.Checked = _engine.Read(c => c.KeepDesktopSdr);
                 _swAlwaysHdr.Checked = HdrEngine.AlwaysHdrSupported && _engine.Read(c => c.AlwaysHdrMode);
                 _swAlwaysKeepHdr.Checked = _engine.Read(c => c.AlwaysHdrKeepHdrOnExit);
+                UpdateAlwaysHdrSettings(_swAlwaysHdr.Checked);
                 _swAutoUpdate.Checked = _engine.Read(c => c.CheckForUpdatesAutomatically);
 
                 _swVideoAuto.Checked = _engine.Read(c => c.VideoHdrAutomation);

@@ -15,6 +15,8 @@ namespace SmartHdrManager
         public static readonly string Folder = System.IO.Path.GetDirectoryName(HdrEngine.LogPath)!;
         public static readonly string FilePath = System.IO.Path.Combine(Folder, "always-hdr-log.txt");
         private static readonly object Gate = new();
+        private const long MaxBytes = 1024 * 1024;   // then the older part moves to always-hdr-log.old.txt, like log.txt
+        private static int _writes;
 
         public static void Write(string line)
         {
@@ -23,6 +25,8 @@ namespace SmartHdrManager
                 lock (Gate)
                 {
                     System.IO.Directory.CreateDirectory(Folder);
+                    if (++_writes % 100 == 1 && System.IO.File.Exists(FilePath) && new System.IO.FileInfo(FilePath).Length > MaxBytes)
+                        System.IO.File.Move(FilePath, System.IO.Path.ChangeExtension(FilePath, ".old.txt"), overwrite: true);
                     System.IO.File.AppendAllText(FilePath, $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {line}{Environment.NewLine}");
                 }
             }
@@ -120,8 +124,11 @@ namespace SmartHdrManager
             return hr;
         }
 
-        /// <summary>Default profile of a slot, or null when there is none. The result code is returned too.</summary>
-        public static string? GetDefault(int scope, HdrController.LUID adapter, uint sourceId, int subtype, out int hr)
+        /// <summary>
+        /// Default profile of a slot, or null when there is none. The result code is returned too. <paramref name="quiet"/>:
+        /// the once-a-second check, logged only when it fails (else the log would grow by megabytes a day).
+        /// </summary>
+        public static string? GetDefault(int scope, HdrController.LUID adapter, uint sourceId, int subtype, out int hr, bool quiet = false)
         {
             hr = ColorProfileGetDisplayDefault(scope, adapter, sourceId, TypeIcc, subtype, out IntPtr name);
             string? value = null;
@@ -130,7 +137,9 @@ namespace SmartHdrManager
                 value = Marshal.PtrToStringUni(name);
                 LocalFree(name);
             }
-            Log($"ColorProfileGetDisplayDefault(scope={scope}, {Id(adapter, sourceId)}, subtype={subtype}) = {Hr(hr)}, name='{value}'");
+            const int NoProfile = unchecked((int)0x80070002);   // "file not found": the slot has no profile
+            if (!quiet || hr != 0 && hr != NoProfile)
+                Log($"ColorProfileGetDisplayDefault(scope={scope}, {Id(adapter, sourceId)}, subtype={subtype}) = {Hr(hr)}, name='{value}'");
             return hr == 0 && !string.IsNullOrEmpty(value) ? value : null;
         }
 

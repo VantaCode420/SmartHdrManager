@@ -236,7 +236,8 @@ namespace SmartHdrManager
             string state = s.Override == HdrOverride.ForceHdr ? "HDR forced on"
                 : s.Override == HdrOverride.ForceSdr ? "SDR forced"
                 : s.Paused ? "paused"
-                : s.AlwaysHdr ? (s.HdrOn ? "HDR content" : "Always-HDR, SDR corrected")
+                : s.AlwaysHdr ? (s.AlwaysSdrFor != null ? $"SDR for {s.AlwaysSdrFor}" : !s.AlwaysRealHdr ? "HDR off"
+                                 : s.HdrOn ? "HDR content" : "Always-HDR, SDR corrected")
                 : s.HdrOn ? "HDR on" : "HDR off";
             string tooltip = $"Smart HDR Manager – {state}";
             if (tooltip != _lastTooltip)
@@ -244,7 +245,7 @@ namespace SmartHdrManager
                 _lastTooltip = tooltip;
                 _tray.UpdateTooltip(tooltip);
             }
-            _tray.UpdateState(s.HdrOn, s.Paused && s.Override == HdrOverride.None);
+            _tray.UpdateState(s.AlwaysHdr ? s.AlwaysRealHdr : s.HdrOn, s.Paused && s.Override == HdrOverride.None);
 
             if (_form == null) return;
 

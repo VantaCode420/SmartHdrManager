@@ -17,6 +17,8 @@ namespace SmartHdrManager
         public bool HdrOn { get; init; }
         public bool Paused { get; init; }
         public bool AlwaysHdr { get; init; }                   // Always-HDR mode: HdrOn means "HDR content, correction off"
+        public bool AlwaysRealHdr { get; init; }               // Always-HDR mode: Windows HDR is really on
+        public string? AlwaysSdrFor { get; init; }             // Always-HDR mode: HDR is off for this SDR app / recording app
         public string ActiveProcess { get; init; } = string.Empty;
         public bool IsFullscreen { get; init; }
         public string? RunningGame { get; init; }
@@ -1364,6 +1366,8 @@ namespace SmartHdrManager
                 HdrOn = _hdrAny,
                 Paused = Paused,
                 AlwaysHdr = _alwaysActive,
+                AlwaysRealHdr = _alwaysActive && _alwaysRealHdrOn,
+                AlwaysSdrFor = _alwaysActive && _alwaysRealSdr ? _alwaysSdrFor : null,
                 ActiveProcess = procName,
                 IsFullscreen = isFullscreen,
                 RunningGame = _runningGame,

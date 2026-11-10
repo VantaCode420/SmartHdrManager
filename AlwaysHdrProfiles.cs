@@ -79,14 +79,19 @@ namespace SmartHdrManager
 
         private static string Short(string text) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(text)))[..8];
 
+        private readonly Dictionary<string, string> _loggedProblems = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Records why a display runs with calibration only. Logged once per new reason, not at every check.</summary>
         private void Problem(HdrController.DisplayTarget d, string text)
         {
             _problems[d.DevicePath] = text;
+            if (_loggedProblems.TryGetValue(d.DevicePath, out string? last) && last == text) return;
+            _loggedProblems[d.DevicePath] = text;
             ColorProfileLog.Write($"PROBLEM {d.Name}: {text}");
         }
 
         /// <summary>The record of a display, created (and saved) before the first change. Null when it can't be used.</summary>
-        private DisplayRecord? Record(HdrController.DisplayTarget d, out string? current)
+        private DisplayRecord? Record(HdrController.DisplayTarget d, out string? current, bool quiet)
         {
             current = null;
             var record = _state.FirstOrDefault(r => r.DevicePath.Equals(d.DevicePath, StringComparison.OrdinalIgnoreCase));
@@ -101,7 +106,7 @@ namespace SmartHdrManager
                 if (hr != 0) { Problem(d, $"Windows did not report the profile scope (0x{hr:X8})."); return null; }
             }
 
-            current = ColorProfileNative.GetDefault(scope, d.AdapterId, d.SourceId, ColorProfileNative.SubtypeHdr, out _);
+            current = ColorProfileNative.GetDefault(scope, d.AdapterId, d.SourceId, ColorProfileNative.SubtypeHdr, out _, quiet && record != null);
             if (record != null) return record;
 
             if (IsOurs(current))
@@ -123,11 +128,16 @@ namespace SmartHdrManager
         /// </summary>
         public bool Apply(HdrController.DisplayTarget d, bool corrected, double white, bool force, string trigger)
         {
-            _problems.Remove(d.DevicePath);
-            if (!d.HdrEnabled) return true;   // the HDR slot only matters while HDR is on
+            if (!d.HdrEnabled)   // the HDR slot only matters while HDR is on
+            {
+                _problems.Remove(d.DevicePath);
+                return true;
+            }
+            bool quiet = trigger == "poll";   // the once-a-second check: only changes and problems are logged
 
-            var record = Record(d, out string? current);
+            var record = Record(d, out string? current, quiet);
             if (record == null) return false;
+            bool hadProblem = _problems.Remove(d.DevicePath);
 
             // Re-calibrated, or another tool set its own profile: the two can't be told apart, so it becomes the new base
             if (current != null && !IsOurs(current) && !string.Equals(current, record.OriginalDefault, StringComparison.OrdinalIgnoreCase))
@@ -151,8 +161,11 @@ namespace SmartHdrManager
                 else ok = false;   // stays on calibration only; the reason is in Problems
             }
 
-            ColorProfileLog.Write($"APPLY {d.Name} trigger={trigger} W={white:0.#} corrected={corrected} current='{current}' desired='{target}'{(force ? " (forced)" : "")}");
-            bool switched = string.Equals(current, target, StringComparison.OrdinalIgnoreCase) && !force || Switch(d, record, target, current, force);
+            bool unchanged = string.Equals(current, target, StringComparison.OrdinalIgnoreCase) && !force;
+            if (!quiet || !unchanged || hadProblem)
+                ColorProfileLog.Write($"APPLY {d.Name} trigger={trigger} W={white:0.#} corrected={corrected} current='{current}' desired='{target}'{(force ? " (forced)" : "")}");
+            if (ok && hadProblem) _loggedProblems.Remove(d.DevicePath);
+            bool switched = unchanged || Switch(d, record, target, current, force);
             if (!switched)
             {
                 Problem(d, $"Windows did not switch to '{target}'.");
@@ -226,7 +239,9 @@ namespace SmartHdrManager
         /// <summary>Profiles for older white levels or calibrations: only the base and the current corrected one stay listed.</summary>
         private void RemoveSuperseded(HdrController.DisplayTarget d, DisplayRecord record, string keep)
         {
-            foreach (string old in record.Generated.Where(n => IsOurs(n) && !n.Equals(keep, StringComparison.OrdinalIgnoreCase)).ToList())
+            var superseded = record.Generated.Where(n => IsOurs(n) && !n.Equals(keep, StringComparison.OrdinalIgnoreCase)).ToList();
+            if (superseded.Count == 0) return;   // the usual case: nothing to write
+            foreach (string old in superseded)
             {
                 ColorProfileNative.RemoveAssociation(record.Scope, old, d.AdapterId, d.SourceId);
                 ColorProfileNative.Uninstall(old);

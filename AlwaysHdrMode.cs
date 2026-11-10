@@ -35,6 +35,7 @@ namespace SmartHdrManager
         private bool _pauseCorrected;
         private bool _alwaysLeftoverChecked;
         private bool _alwaysWasHdrOn;           // HDR was on when the app started (or the mode was switched on)
+        private bool _alwaysRealHdrOn;          // Windows HDR is really on (for the window header and the tray icon)
         private readonly Dictionary<string, (double Stable, double Pending, long Since)> _white = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Short state for the Settings page (any thread).</summary>
@@ -81,6 +82,7 @@ namespace SmartHdrManager
                     return false;
                 }
                 _alwaysRealSdr = false;
+                _alwaysRealHdrOn = true;
                 _lastRealSwitchMs = Now;
                 Interlocked.Exchange(ref _alwaysReapply, 1);   // the HDR slot counts once Windows reports HDR on
                 return true;
@@ -93,6 +95,7 @@ namespace SmartHdrManager
         private void ApplyProfiles(List<HdrController.DisplayTarget> displays, bool force, string trigger)
         {
             long now = Now;
+            _alwaysRealHdrOn = displays.Any(d => d.HdrEnabled);
             foreach (var d in displays.Where(d => d.HdrEnabled))
             {
                 double white = StableWhite(d, now);
@@ -173,6 +176,7 @@ namespace SmartHdrManager
                     if (HdrController.SetHdrState(false, s.Monitors))
                     {
                         _alwaysRealSdr = true;
+                        _alwaysRealHdrOn = false;
                         _alwaysSdrFor = sdrFor;
                         if (s.ReloadProfile || s.RefreshApps)
                             SchedulePostSdrFixes(s.Monitors, s.ReloadProfile, s.RefreshApps, s.Browsers, null);
@@ -187,6 +191,7 @@ namespace SmartHdrManager
                 if (HdrController.SetHdrState(true, s.Monitors))
                 {
                     _alwaysRealSdr = false;
+                    _alwaysRealHdrOn = true;
                     _alwaysSdrFor = null;
                     Interlocked.Exchange(ref _alwaysReapply, 1);
                 }
