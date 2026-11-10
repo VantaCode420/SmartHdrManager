@@ -2,7 +2,19 @@
 
 Turns Windows HDR on automatically when you need it – HDR games, HDR videos on YouTube, local videos in your video player (including SDR videos with NVIDIA RTX Video HDR) – and back to SDR when you are done. It lives in the system tray.
 
-**New in 3.0: Always-HDR mode** (experimental, Windows 11) – HDR stays on, SDR content gets a gamma 2.2 correction so it no longer looks washed out, and HDR games and videos get your calibration only, switched automatically with no black screen (see *Always-HDR* below). Also: choose the exes a game is watched by (*Options › Programs this game runs as*), *RenoDX Games* only counts RenoDX HDR mods (not its FPS limiter or DLSS tools), and Unreal games that start from another folder (e.g. ACE COMBAT 8) are detected. **2.7:** *RenoDX Games* uses HDR for every game with the RenoDX add-on, deleted games leave the Games tab, and a settings file that is briefly locked at start-up (antivirus, backup tool) is no longer replaced by default settings. **2.6:** the app only switches back HDR that it turned on itself – HDR you (or madVR, a game, another tool) turned on stays on. New **Apps** tab: one mode per video player, browser, creative app and recording app – programs that are not listed are never touched. **Check for updates** with one-click install, a hint when a game closes right after HDR came on (e.g. a crash with NVIDIA RTX HDR), and a choice how often the app looks for new games. **2.6.2:** more game libraries (Battle.net, Amazon Games, itch.io, Riot Games, Heroic, Xbox games in custom folders, games the Game Bar saw), the exe Steam really starts, programs that only share a game's exe name no longer switch HDR, and local HDR videos are also recognised from the file (not only from "HDR" in the title). **2.6.1:** games set to *Never HDR* can be restored (Settings › General › Never HDR games); cs2 and valorant are no longer excluded by default. **2.5.2:** games with a launcher (The Witcher 3 from GOG, …), HDR stays on while a video is paused, *SDR for this video*. See [CHANGELOG.md](CHANGELOG.md).
+**New in 3.0: Always-HDR mode** (experimental, Windows 11) – HDR stays on, SDR content gets a gamma 2.2 correction so it no longer looks washed out, and HDR games and videos get your calibration only, switched automatically with no black screen (see *Always-HDR* below). Also: choose the exes a game is watched by (*Options › Programs this game runs as*), *RenoDX Games* only counts RenoDX HDR mods (not its FPS limiter or DLSS tools), and Unreal games that start from another folder (e.g. ACE COMBAT 8) are detected. 
+
+**2.7:** *RenoDX Games* uses HDR for every game with the RenoDX add-on, deleted games leave the Games tab, and a settings file that is briefly locked at start-up (antivirus, backup tool) is no longer replaced by default settings. 
+
+**2.6.2:** more game libraries (Battle.net, Amazon Games, itch.io, Riot Games, Heroic, Xbox games in custom folders, games the Game Bar saw), the exe Steam really starts, programs that only share a game's exe name no longer switch HDR, and local HDR videos are also recognised from the file (not only from "HDR" in the title).
+
+**2.6.1:** games set to *Never HDR* can be restored (Settings › General › Never HDR games); cs2 and valorant are no longer excluded by default. 
+
+**2.6:** the app only switches back HDR that it turned on itself – HDR you (or madVR, a game, another tool) turned on stays on. New **Apps** tab: one mode per video player, browser, creative app and recording app – programs that are not listed are never touched. **Check for updates** with one-click install, a hint when a game closes right after HDR came on (e.g. a crash with NVIDIA RTX HDR), and a choice how often the app looks for new games.
+
+**2.5.2:** games with a launcher (The Witcher 3 from GOG, …), HDR stays on while a video is paused, *SDR for this video*.
+
+See [CHANGELOG.md](CHANGELOG.md).
 
    ![Smart HDR Manager main window](docs/main.png)
 
