@@ -34,6 +34,7 @@ namespace SmartHdrManager
         private long _lastRealSwitchMs = long.MinValue / 2;
         private bool _pauseCorrected;
         private bool _alwaysLeftoverChecked;
+        private bool _alwaysWasHdrOn;           // HDR was on when the app started (or the mode was switched on)
         private readonly Dictionary<string, (double Stable, double Pending, long Since)> _white = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>Short state for the Settings page (any thread).</summary>
@@ -230,14 +231,8 @@ namespace SmartHdrManager
         {
             _alwaysActive = true;
             var displays = TargetDisplays(s.Monitors);
-            lock (Sync)
-            {
-                if (Config.AlwaysHdrWasHdrOn == null)
-                {
-                    Config.AlwaysHdrWasHdrOn = displays.Any(d => d.HdrEnabled);
-                    Save();
-                }
-            }
+            // How HDR was when this session of the mode started (app start or mode switched on): what exiting goes back to
+            _alwaysWasHdrOn = displays.Any(d => d.HdrEnabled);
             // HDR content that runs right now keeps its HDR: the correction starts off on those displays
             _correctionOff.Clear();
             if (_hdrAny && _hdrOnByApp)
@@ -258,18 +253,9 @@ namespace SmartHdrManager
             if (removeEverything) Profiles.RemoveAll(displays);
             else Profiles.RestoreOriginals(displays);
 
-            bool? wasOn;
+            bool wasOn = _alwaysWasHdrOn;
             bool keepOn;
-            lock (Sync)
-            {
-                wasOn = Config.AlwaysHdrWasHdrOn;
-                keepOn = exiting && Config.AlwaysHdrKeepHdrOnExit;
-                if (!exiting)
-                {
-                    Config.AlwaysHdrWasHdrOn = null;
-                    Save();
-                }
-            }
+            lock (Sync) keepOn = exiting && Config.AlwaysHdrKeepHdrOnExit;
 
             bool content = _correctionOff.Count > 0;
             _correctionOff.Clear();
@@ -286,9 +272,9 @@ namespace SmartHdrManager
                 _hdrOnByApp = true;
                 Log("HDR", "Always-HDR mode off – HDR stays on for the content that is running and goes off when it ends.");
             }
-            else if (wasOn == false && !keepOn && TargetDisplays(s.Monitors).Any(d => d.HdrEnabled))
+            else if (!wasOn && !keepOn && TargetDisplays(s.Monitors).Any(d => d.HdrEnabled))
             {
-                Log("SDR", $"Always-HDR mode {(exiting ? "– app closed" : "off")}: back to SDR, as before the mode started.");
+                Log("SDR", $"Always-HDR mode {(exiting ? "– app closed" : "off")}: back to SDR, as it was before Always-HDR turned HDR on.");
                 if (!HdrController.SetHdrState(false, s.Monitors)) Log("ERROR", HdrController.LastError);
             }
             else Log("HDR", $"Always-HDR mode {(exiting ? "– app closed" : "off")}: HDR left as it is.");

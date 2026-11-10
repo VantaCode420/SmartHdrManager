@@ -424,6 +424,18 @@ namespace SmartHdrManager
             _neverHdrDesc = RowDescription(neverRow);
             Add(neverRow, 68);
 
+            // ---- Always-HDR ----
+            Section("Always-HDR (experimental)", "HDR stays on. SDR content gets a gamma 2.2 correction, HDR content your calibration only.");
+            var alwaysRow = SettingRow("Always-HDR", AlwaysHdrDefaultText, _swAlwaysHdr);
+            _alwaysHdrDesc = RowDescription(alwaysRow);
+            _swAlwaysHdr.Enabled = HdrEngine.AlwaysHdrSupported;
+            Add(alwaysRow, 68);
+            Add(SettingRow("Keep HDR on when the app exits", "Off: HDR goes back to how it was when the app started.", _swAlwaysKeepHdr), 68);
+            var removeAlways = new ModernButton { Text = "Remove", AutoSize = true };
+            _toolTip.SetToolTip(removeAlways, "Switches Always-HDR off, puts your calibration profile back and removes every colour profile it created");
+            removeAlways.Click += (_, _) => OnRemoveAlwaysHdr();
+            Add(SettingRow("Remove Always-HDR profiles", "Turns the mode off and removes every colour profile it created.", removeAlways), 68);
+
             // ---- Monitors ----
             var monitors = _engine.GetMonitors();
             int hdrMonitors = monitors.Count(m => m.HdrSupported);
@@ -484,18 +496,6 @@ namespace SmartHdrManager
                        "come first. One video should stay in SDR? Tray menu › SDR for this video."
             });
             Detail(videoCard, 84);
-
-            // ---- Always-HDR ----
-            Section("Always-HDR (experimental)", "HDR stays on. SDR content gets a gamma 2.2 correction, HDR content your calibration only.");
-            var alwaysRow = SettingRow("Always-HDR", AlwaysHdrDefaultText, _swAlwaysHdr);
-            _alwaysHdrDesc = RowDescription(alwaysRow);
-            _swAlwaysHdr.Enabled = HdrEngine.AlwaysHdrSupported;
-            Add(alwaysRow, 68);
-            Add(SettingRow("Keep HDR on when the app exits", "Off: HDR goes back to how it was before the mode started.", _swAlwaysKeepHdr), 68);
-            var removeAlways = new ModernButton { Text = "Remove", AutoSize = true };
-            _toolTip.SetToolTip(removeAlways, "Switches Always-HDR off, puts your calibration profile back and removes every colour profile it created");
-            removeAlways.Click += (_, _) => OnRemoveAlwaysHdr();
-            Add(SettingRow("Remove Always-HDR profiles", "Turns the mode off and removes every colour profile it created.", removeAlways), 68);
 
             // ---- Display fixes ----
             Section("Display fixes", "Repairs side effects of leaving HDR.");

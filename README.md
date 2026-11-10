@@ -103,7 +103,7 @@ Some games only check whether Windows HDR is on at the moment they start, and hi
 - **HDR content:** your calibration only. Everything that switches HDR on in the normal mode – games switched on in the Games tab, RenoDX games, HDR videos, SDR videos with RTX Video HDR, the tray's *HDR on*, *Launch with HDR* – turns the correction off instead. No black screen, and games see HDR on from their first frame.
 - **Switch your HDR games on in the Games tab.** The app can't see whether a game outputs HDR: an HDR game that isn't switched on there keeps the correction, and its shadows look too dark.
 - **SDR apps:** creative apps set to SDR, recording apps set to *No HDR* and the tray's *SDR* really turn HDR off, as in the normal mode. Pause leaves the correction on.
-- **Exit:** your calibration profile goes back. *Keep HDR on when the app exits* decides whether HDR stays on or goes back to how it was before the mode started. **Remove Always-HDR profiles** turns the mode off and removes everything it created.
+- **Exit:** your calibration profile goes back. *Keep HDR on when the app exits* decides whether HDR stays on or goes back to how it was when the app started. **Remove Always-HDR profiles** turns the mode off and removes everything it created.
 - Needs a Windows HDR Calibration profile on the display (Microsoft Store: *Windows HDR Calibration*). No administrator rights. A switch takes about a second to show. OLED monitors: a permanent HDR desktop can dim large bright windows and wears the panel faster.
 
 <p>

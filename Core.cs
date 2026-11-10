@@ -186,10 +186,8 @@ namespace SmartHdrManager
         // HDR stays on; SDR content gets a gamma 2.2 corrected copy of the calibration profile, HDR content the calibration
         // only. Off by default: Classic switching is unchanged.
         public bool AlwaysHdrMode { get; set; } = false;
-        // When the app exits: keep HDR on (true) or go back to how it was before the mode started (false)
+        // When the app exits: keep HDR on (true) or go back to how it was when the app started (false)
         public bool AlwaysHdrKeepHdrOnExit { get; set; } = false;
-        // Whether HDR was on when the mode was switched on (null while the mode is off)
-        public bool? AlwaysHdrWasHdrOn { get; set; }
     }
 
     public sealed class GameOptions
