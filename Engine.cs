@@ -244,9 +244,17 @@ namespace SmartHdrManager
 
                 // Library exes only: ProgramPaths holds the first exe of that name found anywhere (drive scan, Game Bar,
                 // program caches), which may be the other program. A moved game passes because its old exe is gone.
+                // Every known exe of the game counts with its own folder (Ace Combat 8 starts in "ACZero\", the game runs from
+                // "Game\Binaries\Win64\", GitHub issue #10; an exe added in Options can be anywhere). The main exe's folder
+                // counts for every process too: learned launcher games have no known path and live next to it.
                 foreach (var g in c.LibraryGames ?? new List<LibraryGame>())
                     foreach (string p in g.Processes ?? new List<string>())
-                        if (hdrGames.Contains(p)) Add(p, g.ExePath);   // the game's other exes (Unreal shipping exe, learned games) live in the same folder
+                    {
+                        if (!hdrGames.Contains(p)) continue;
+                        Add(p, g.ExePath);
+                        foreach (string path in g.ExePaths ?? new List<string>())
+                            if (string.Equals(ProcessNameOf(path), p, StringComparison.OrdinalIgnoreCase)) Add(p, path);
+                    }
                 return folders.ToDictionary(kv => kv.Key, kv => (kv.Value.ToArray(), exes[kv.Key].ToArray()), Cmp);
             }
 
@@ -483,6 +491,7 @@ namespace SmartHdrManager
                     DiscoveredGames = c.DiscoveredGames,
                     LibraryGames = c.LibraryGames,
                     PerGameOptions = c.PerGameOptions,
+                    GameExeOverrides = c.GameExeOverrides,
                     ProgramPaths = c.ProgramPaths,
                     CustomGameFolders = c.CustomGameFolders,
                     LastDriveScanUtc = c.LastDriveScanUtc,
@@ -727,6 +736,7 @@ namespace SmartHdrManager
                 }
 
                 var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg), apps);
+                lock (Sync) ApplyExeOverrides(games, log: fullRescan);   // the exes you changed in Options, before the RenoDX check
                 GameLibraryScanner.DetectRenoDx(games);   // not cached: an add-on installed later shows up at the next refresh
                 var knownPaths = GameLibraryScanner.FindKnownExePaths();
                 var deleted = FindDeletedPrograms(lastPaths, games, knownPaths);   // file checks outside the lock
@@ -735,6 +745,7 @@ namespace SmartHdrManager
                 lock (Sync)
                 {
                     MergeLearnedLaunchers(games);
+                    ApplyExeOverrides(games, log: false);   // again: a removed exe may be a launcher's game learned meanwhile
                     // A Game Bar suggestion for a game process learned from its launcher would list the game twice
                     var covered = new HashSet<string>(games.Where(g => g.Source != "Game Bar").SelectMany(g => g.Processes), Cmp);
                     games.RemoveAll(g => g.Source == "Game Bar" && g.Processes.Any(covered.Contains));
@@ -788,7 +799,12 @@ namespace SmartHdrManager
             }
 
             foreach (var game in Config.LibraryGames ?? new List<LibraryGame>())
-                foreach (string p in game.Processes) Add(p, game.ExePath);
+                foreach (string p in game.Processes)
+                {
+                    Add(p, game.ExePath);
+                    foreach (string path in game.ExePaths ?? new List<string>())
+                        if (string.Equals(ProcessNameOf(path), p, StringComparison.OrdinalIgnoreCase)) Add(p, path);
+                }
             var names = allPrograms ? result.Keys.Concat(Config.HdrGamesAndApps).Concat(Config.DiscoveredGames).ToList() : result.Keys.ToList();
             foreach (string p in names)
                 if (Config.ProgramPaths.TryGetValue(p, out var path)) Add(p, path);
@@ -843,7 +859,10 @@ namespace SmartHdrManager
         private static LibraryGame CopyOf(LibraryGame g) => new()
         {
             Id = g.Id, Name = g.Name, Source = g.Source, Processes = new List<string>(g.Processes), ExePath = g.ExePath, ScanVersion = g.ScanVersion,
-            RenoDx = g.RenoDx
+            RenoDx = g.RenoDx, RenoDxAddon = g.RenoDxAddon,
+            ExePaths = new List<string>(g.ExePaths ?? new List<string>()),
+            DetectedProcesses = new List<string>(g.DetectedProcesses ?? new List<string>()),
+            DetectedExePaths = new List<string>(g.DetectedExePaths ?? new List<string>())
         };
 
         /// <summary>True when the "RenoDX Games" switch makes this game use HDR. Caller holds Sync.</summary>
@@ -2665,7 +2684,7 @@ namespace SmartHdrManager
 
                 // Same row in the Games tab as the launcher's library game
                 foreach (var g in Config.LibraryGames)
-                    if (g.Processes.Contains(launcher, Cmp) && !g.Processes.Contains(game, Cmp))
+                    if (g.Processes.Contains(launcher, Cmp) && !g.Processes.Contains(game, Cmp) && !ExeRemovedByUser(g.Id, game))
                         g.Processes.Add(game);
 
                 InvalidateSnapshot();
@@ -3107,7 +3126,8 @@ namespace SmartHdrManager
                     var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
                     if (procs.Count == 0) continue;
 
-                    string renoDx = game.RenoDx ? "  ·  RenoDX" : string.Empty;
+                    string renoDx = !game.RenoDx ? string.Empty
+                                  : string.IsNullOrEmpty(game.RenoDxAddon) ? "  ·  RenoDX" : $"  ·  RenoDX ({game.RenoDxAddon})";
                     rows.Add(new GameRow
                     {
                         Key = game.Id,
@@ -3725,7 +3745,29 @@ namespace SmartHdrManager
             c.VideoHdrActivationSeconds = Math.Clamp(c.VideoHdrActivationSeconds, 0, 30);
             c.BrowserSdrVideoToken ??= string.Empty;
             c.SdrFallbackDelaySeconds = Math.Clamp(c.SdrFallbackDelaySeconds, 0, 30);
-            foreach (var g in c.LibraryGames) g.Processes ??= new List<string>();
+            foreach (var g in c.LibraryGames)
+            {
+                g.Processes ??= new List<string>();
+                g.ExePaths ??= new List<string>();
+                g.DetectedProcesses ??= new List<string>();
+                g.DetectedExePaths ??= new List<string>();
+            }
+
+            // Exes changed in Options (3.0): case-insensitive game ids, lower-case process names, no empty entries
+            var exeOverrides = new Dictionary<string, GameExeOverride>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in c.GameExeOverrides ?? new Dictionary<string, GameExeOverride>())
+            {
+                if (string.IsNullOrWhiteSpace(kv.Key) || kv.Value == null) continue;
+                var o = new GameExeOverride
+                {
+                    Added = (kv.Value.Added ?? new List<string>()).Where(p => !string.IsNullOrWhiteSpace(p) && p.Trim().EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+                                                               .Select(p => p.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),
+                    Removed = (kv.Value.Removed ?? new List<string>()).Where(p => !string.IsNullOrWhiteSpace(p))
+                                                                   .Select(p => p.Trim().ToLowerInvariant()).Distinct().ToList()
+                };
+                if (!o.IsEmpty) exeOverrides[kv.Key.Trim()] = o;
+            }
+            c.GameExeOverrides = exeOverrides;
 
             // Learned launchers: case-insensitive keys, lower-case names, no empty entries
             var launchers = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);

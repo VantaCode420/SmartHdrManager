@@ -76,8 +76,8 @@ namespace SmartHdrManager
 
         // Bumped when the exe detection changes, so cached library entries are detected again once after an update
         // (2: launcher check + several exes per game, 3: extra exes must belong to the game by name – 2.5.2,
-        // 4: Steam exes from the launch options in appinfo.vdf).
-        public const int CurrentScanVersion = 4;
+        // 4: Steam exes from the launch options in appinfo.vdf, 5: Unreal game exes in another folder than the starter – 3.0.0).
+        public const int CurrentScanVersion = 5;
 
         // Executables found earlier, by game id: reused when the main exe still exists, so a quick refresh
         // does not have to search every install folder again (a full rescan passes null).
@@ -121,6 +121,13 @@ namespace SmartHdrManager
             _previous = null;
             _log = null;
 
+            // What the scan found, before learned launchers and the exes you changed in Options (applied by the engine)
+            foreach (var g in games)
+            {
+                g.DetectedProcesses = new List<string>(g.Processes);
+                g.DetectedExePaths = new List<string>(g.ExePaths);
+            }
+
             // One entry per id, games without a detectable executable are dropped
             return games
                 .Where(g => g.Processes.Count > 0)
@@ -131,45 +138,159 @@ namespace SmartHdrManager
         }
 
         // ------------------------------------------------------------------
-        // RenoDX: a ReShade add-on, installed as "renodx-<name>.addon64" (or .addon32) next to the game's exe.
-        // Only file names are looked at (no file is opened), in the exe's folder, the folders above it up to the game
-        // folder and Unreal's Binaries folders – no search through the whole game folder, so a refresh stays fast.
+        // RenoDX: a ReShade add-on, installed as "renodx-<name>.addon64" (or .addon32) where ReShade is (next to the
+        // game's exe, or in Unreal's Binaries folder). Only HDR mods count, not RenoDX tools (FPS limiter, DLSS tools …,
+        // GitHub issue #9). Where a ReShade.ini is found, only add-ons ReShade really loads count: the ones in its add-on
+        // folder ([ADDON] AddonPath) that it doesn't list as disabled. Without a ReShade.ini (ReShade not started yet)
+        // an add-on counts next to a ReShade DLL. Only file names, ReShade.ini and the DLL's version info are read, in
+        // the exe folders, the folders above them up to the game folder and Unreal's Binaries folders – no search through
+        // the whole game folder, so a refresh stays fast.
         // ------------------------------------------------------------------
         public static void DetectRenoDx(IEnumerable<LibraryGame> games)
         {
-            foreach (var game in games) game.RenoDx = HasRenoDx(game.ExePath);
+            foreach (var game in games)
+            {
+                string? addon = FindRenoDx(game);
+                game.RenoDx = addon != null;
+                game.RenoDxAddon = addon;
+            }
         }
 
-        private static bool HasRenoDx(string? exePath)
+        /// <summary>The name of the RenoDX HDR mod ReShade loads for this game ("cp2077"), or null.</summary>
+        private static string? FindRenoDx(LibraryGame game)
         {
-            if (string.IsNullOrEmpty(exePath)) return false;
-            try
-            {
-                string? dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
-                string? root = HdrLauncher.GameFolder(exePath)?.TrimEnd('\\');
-                for (int level = 0; level < 4 && dir != null; level++)
-                {
-                    if (HasRenoDxAddon(dir)) return true;
-                    // Stop at the game folder; for a game without a safe folder (drive root, shared "Games" folder)
-                    // only the exe's own folder counts
-                    if (root == null || dir.TrimEnd('\\').Equals(root, StringComparison.OrdinalIgnoreCase)) break;
-                    dir = Path.GetDirectoryName(dir);
-                }
+            var exes = (game.ExePaths ?? new List<string>()).ToList();
+            if (!string.IsNullOrEmpty(game.ExePath) && !exes.Contains(game.ExePath, StringComparer.OrdinalIgnoreCase)) exes.Insert(0, game.ExePath);
 
-                // Unreal games: the main exe is often a small starter in the game folder, while the real game and its
-                // add-ons are in "<project>\Binaries\Win64" (or WinGDK for Game Pass builds)
-                if (root != null)
+            var folders = new List<string>();
+            void AddFolder(string? dir)
+            {
+                if (!string.IsNullOrEmpty(dir) && !folders.Contains(dir.TrimEnd('\\'), StringComparer.OrdinalIgnoreCase)) folders.Add(dir.TrimEnd('\\'));
+            }
+            foreach (string exePath in exes)
+            {
+                try
                 {
-                    foreach (string project in Directory.EnumerateDirectories(root).Prepend(root))
+                    string? dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+                    string? root = HdrLauncher.GameFolder(exePath)?.TrimEnd('\\');
+                    for (int level = 0; level < 4 && dir != null; level++)
                     {
-                        if (HasRenoDxAddon(Path.Combine(project, "Binaries", "Win64")) ||
-                            HasRenoDxAddon(Path.Combine(project, "Binaries", "WinGDK"))) return true;
+                        AddFolder(dir);
+                        // Stop at the game folder; for a game without a safe folder (drive root, shared "Games" folder)
+                        // only the exe's own folder counts
+                        if (root == null || dir.TrimEnd('\\').Equals(root, StringComparison.OrdinalIgnoreCase)) break;
+                        dir = Path.GetDirectoryName(dir);
+                    }
+
+                    // Unreal games: the main exe is often a small starter in the game folder, while the real game and its
+                    // add-ons are in "<project>\Binaries\Win64" (or WinGDK for Game Pass builds)
+                    if (root != null && Directory.Exists(root))
+                    {
+                        foreach (string project in Directory.EnumerateDirectories(root).Prepend(root))
+                        {
+                            foreach (string platform in new[] { "Win64", "WinGDK" })
+                            {
+                                string binaries = Path.Combine(project, "Binaries", platform);
+                                if (Directory.Exists(binaries)) AddFolder(binaries);
+                            }
+                        }
                     }
                 }
+                catch
+                {
+                    // folder gone or not readable: nothing to check there
+                }
+            }
+
+            // ReShade.ini where ReShade is installed: only the add-ons it loads
+            bool reShadeFound = false;
+            foreach (string folder in folders)
+            {
+                string? ini = ReShadeIni(folder);
+                if (ini == null) continue;
+                reShadeFound = true;
+                string? addon = LoadedHdrMod(folder, ini);
+                if (addon != null) return addon;
+            }
+            if (reShadeFound) return null;
+
+            // ReShade not started yet (no ReShade.ini): an HDR mod next to a ReShade DLL
+            foreach (string folder in folders)
+            {
+                if (!HasReShadeDll(folder)) continue;
+                string? addon = HdrModsIn(folder, null).FirstOrDefault();
+                if (addon != null) return addon;
+            }
+            return null;
+        }
+
+        private static string? ReShadeIni(string folder)
+        {
+            try
+            {
+                string path = Path.Combine(folder, "ReShade.ini");
+                return File.Exists(path) ? path : null;   // file names are not case-sensitive on Windows
+            }
+            catch { return null; }
+        }
+
+        /// <summary>The first HDR mod in the add-on folder of this ReShade.ini that isn't disabled there.</summary>
+        private static string? LoadedHdrMod(string folder, string iniPath)
+        {
+            try
+            {
+                var info = new FileInfo(iniPath);
+                if (info.Length > 1024 * 1024) return null;   // not a ReShade.ini
+                var settings = RenoDxAddons.ParseReShadeIni(ReadSharedText(iniPath) ?? string.Empty);
+                string addonFolder = folder;
+                if (!string.IsNullOrWhiteSpace(settings.AddonPath))
+                {
+                    string path = Environment.ExpandEnvironmentVariables(settings.AddonPath.Replace('/', '\\'));
+                    addonFolder = Path.GetFullPath(Path.Combine(folder, path));   // relative to the ini's folder, or absolute
+                }
+                return HdrModsIn(addonFolder, settings.DisabledFiles).FirstOrDefault();
             }
             catch
             {
-                // folder gone or not readable: no RenoDX
+                return null;
+            }
+        }
+
+        /// <summary>RenoDX HDR mods in one folder (not its subfolders, as ReShade loads them), tools and disabled files left out.</summary>
+        private static IEnumerable<string> HdrModsIn(string folder, ISet<string>? disabledFiles)
+        {
+            List<string> files;
+            try { files = Directory.Exists(folder) ? Directory.EnumerateFiles(folder, "renodx*").ToList() : new List<string>(); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { files = new List<string>(); }
+            foreach (string file in files.OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!RenoDxAddons.IsAddonFile(file) || disabledFiles?.Contains(Path.GetFileName(file)) == true) continue;
+                string name = RenoDxAddons.NameOf(file);
+                if (name.Length > 0 && !RenoDxAddons.IsTool(name)) yield return name;
+            }
+        }
+
+        // The file names ReShade is installed as (its installer picks the one the game loads)
+        private static readonly string[] ReShadeDllNames =
+        {
+            "dxgi.dll", "d3d9.dll", "d3d10.dll", "d3d11.dll", "d3d12.dll", "opengl32.dll", "dinput8.dll", "ddraw.dll", "ReShade64.dll", "ReShade32.dll"
+        };
+
+        /// <summary>True when a DLL in this folder is ReShade (by the product name in its version info; the file isn't loaded).</summary>
+        private static bool HasReShadeDll(string folder)
+        {
+            foreach (string name in ReShadeDllNames)
+            {
+                try
+                {
+                    string path = Path.Combine(folder, name);
+                    if (!File.Exists(path)) continue;
+                    var version = System.Diagnostics.FileVersionInfo.GetVersionInfo(path);
+                    if ((version.ProductName ?? string.Empty).Contains("ReShade", StringComparison.OrdinalIgnoreCase) ||
+                        (version.FileDescription ?? string.Empty).Contains("ReShade", StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+                catch { }
             }
             return false;
         }
@@ -201,19 +322,6 @@ namespace SmartHdrManager
             {
                 return false;
             }
-        }
-
-        /// <summary>An unreadable folder counts as "no add-on here", so the other folders are still checked.</summary>
-        private static bool HasRenoDxAddon(string dir)
-        {
-            try { return Directory.Exists(dir) && Directory.EnumerateFiles(dir, "renodx*").Any(IsRenoDxAddon); }
-            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return false; }
-        }
-
-        private static bool IsRenoDxAddon(string file)
-        {
-            string ext = Path.GetExtension(file);
-            return ext.Equals(".addon64", StringComparison.OrdinalIgnoreCase) || ext.Equals(".addon32", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void Try(Action action, string source, Action<string>? log)
@@ -366,6 +474,7 @@ namespace SmartHdrManager
             List<string> FolderExes() => folderExes ??= ExesIn(folder);
             AddShippingCounterpart(exes, folder);
             AddUnrealShipping(exes, FolderExes);
+            AddUnrealGameExe(exes, folder);
             AddSiblingExes(exes, FolderExes, nameKey, dirKey);
 
             // Only a settings tool in the launch options: the game exe found next to it comes first, and the tool is dropped
@@ -421,6 +530,53 @@ namespace SmartHdrManager
                 if (shipping != null && exes.Count < 4) exes.Add(shipping);
             }
             catch { }
+        }
+
+        /// <summary>
+        /// Unreal games started by a program outside the game's Binaries folder (Ace Combat 8: Steam starts "ACZero\acz.exe",
+        /// the game runs as "Game\Binaries\Win64\AceCombat8.exe", GitHub issue #10): when no watched exe is in a Binaries
+        /// folder, the largest exe (20 MB or more) in "&lt;install folder&gt;\&lt;project&gt;\Binaries\Win64" (or WinGDK) is
+        /// watched too, whatever its name. Only in folders laid out like an Unreal game (an Engine folder, or Content\Paks
+        /// next to Binaries). Uses the install folder, not the main exe's folder (that is "ACZero" for Ace Combat 8).
+        /// </summary>
+        private static void AddUnrealGameExe(List<string> exes, string folder)
+        {
+            try
+            {
+                if (exes.Count == 0 || exes.Count >= 4 || exes.Any(InUnrealBinaries) || !Directory.Exists(folder)) return;
+                bool engine = Directory.Exists(Path.Combine(folder, "Engine"));
+                string? best = null;
+                long bestSize = 20L * 1024 * 1024 - 1;
+                foreach (string project in Directory.EnumerateDirectories(folder))
+                {
+                    if (Path.GetFileName(project).Equals("Engine", StringComparison.OrdinalIgnoreCase)) continue;   // crash reporter, web helper
+                    if (!engine && !Directory.Exists(Path.Combine(project, "Content", "Paks"))) continue;
+                    foreach (string platform in new[] { "Win64", "WinGDK" })
+                    {
+                        string dir = Path.Combine(project, "Binaries", platform);
+                        if (!Directory.Exists(dir)) continue;
+                        foreach (string exe in Directory.EnumerateFiles(dir, "*.exe"))
+                        {
+                            string lower = Path.GetFileNameWithoutExtension(exe).ToLowerInvariant();
+                            if (IsExcludedExe(lower) || LooksLikeLauncher(exe) || lower.Contains("server") || lower.Contains("editor") ||
+                                lower.Contains("benchmark")) continue;
+                            long size = new FileInfo(exe).Length;
+                            if (size > bestSize) { best = exe; bestSize = size; }
+                        }
+                    }
+                }
+                if (best != null && !exes.Any(e => Path.GetFileName(e).Equals(Path.GetFileName(best), StringComparison.OrdinalIgnoreCase)))
+                    exes.Add(best);
+            }
+            catch { }
+        }
+
+        /// <summary>An exe in "...\Binaries\Win64" or "...\Binaries\WinGDK".</summary>
+        private static bool InUnrealBinaries(string exe)
+        {
+            string? dir = Path.GetDirectoryName(exe);
+            string? parent = dir == null ? null : Path.GetDirectoryName(dir);
+            return parent != null && Path.GetFileName(parent).Equals("Binaries", StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
@@ -967,7 +1123,11 @@ namespace SmartHdrManager
                 if (owner != null)
                 {
                     // A tool of that game (editor, config, server …) is not added: the game's HDR setting would carry over to it
-                    if (owner.Processes.Count < 4 && !IsToolLike(exe)) owner.Processes.Add(process);
+                    if (owner.Processes.Count < 4 && !IsToolLike(exe))
+                    {
+                        owner.Processes.Add(process);
+                        owner.ExePaths.Add(exe);
+                    }
                     knownProcesses.Add(process);
                     continue;
                 }
@@ -1150,7 +1310,10 @@ namespace SmartHdrManager
                             .ToList();
 
                         if (!IsNonGameName(name))
+                        {
+                            AddUnrealGameExe(exes, content);
                             game = Make($"xbox:{folderName}", name, "Xbox", exes);
+                        }
                     }
                     catch { }
 
@@ -1266,9 +1429,14 @@ namespace SmartHdrManager
         private static bool CanReuse(string id)
         {
             var prev = _previous;
-            return prev != null && prev.TryGetValue(id, out var old) && old.Processes.Count > 0 && !string.IsNullOrEmpty(old.ExePath) &&
-                   File.Exists(old.ExePath) && old.ScanVersion >= CurrentScanVersion;
+            if (prev == null || !prev.TryGetValue(id, out var old) || old.ScanVersion < CurrentScanVersion) return false;
+            string? main = DetectedMain(old);
+            return DetectedProcessesOf(old).Count > 0 && !string.IsNullOrEmpty(main) && File.Exists(main);
         }
+
+        // What the scan found last time (games saved before 3.0.0 only have Processes / ExePath)
+        private static List<string> DetectedProcessesOf(LibraryGame g) => g.DetectedProcesses.Count > 0 ? g.DetectedProcesses : g.Processes;
+        private static string? DetectedMain(LibraryGame g) => g.DetectedExePaths.Count > 0 ? g.DetectedExePaths[0] : g.ExePath;
 
         private static bool TryReuse(string id, string name, string source, out LibraryGame game)
         {
@@ -1276,13 +1444,17 @@ namespace SmartHdrManager
             if (!CanReuse(id)) return false;
             var old = _previous![id];
 
+            var exePaths = old.DetectedExePaths.Count > 0 ? old.DetectedExePaths
+                         : old.ExePaths.Count > 0 ? old.ExePaths
+                         : new List<string> { old.ExePath! };
             game = new LibraryGame
             {
                 Id = id,
                 Name = name.Trim(),
                 Source = source,
-                Processes = new List<string>(old.Processes),
-                ExePath = old.ExePath,
+                Processes = new List<string>(DetectedProcessesOf(old)),
+                ExePaths = new List<string>(exePaths),
+                ExePath = DetectedMain(old),
                 ScanVersion = old.ScanVersion
             };
             return true;
@@ -1290,6 +1462,7 @@ namespace SmartHdrManager
 
         private static LibraryGame Make(string id, string name, string source, List<string> exePaths)
         {
+            var existing = exePaths.Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
             return new LibraryGame
             {
                 Id = id,
@@ -1300,7 +1473,8 @@ namespace SmartHdrManager
                     .Where(p => p.Length > 0)
                     .Distinct()
                     .ToList(),
-                ExePath = exePaths.FirstOrDefault(File.Exists),
+                ExePaths = existing,
+                ExePath = existing.FirstOrDefault(),
                 ScanVersion = CurrentScanVersion
             };
         }
@@ -1346,7 +1520,11 @@ namespace SmartHdrManager
                     }
                 }
                 exes.Add(registeredExe);
-                if (folderOk) AddShippingCounterpart(exes, folder);
+                if (folderOk)
+                {
+                    AddShippingCounterpart(exes, folder);
+                    AddUnrealGameExe(exes, folder);
+                }
                 return exes;
             }
 
@@ -1470,6 +1648,7 @@ namespace SmartHdrManager
                 result.Add(path);
                 names.Add(file);
             }
+            AddUnrealGameExe(result, folder);
             return result;
         }
 

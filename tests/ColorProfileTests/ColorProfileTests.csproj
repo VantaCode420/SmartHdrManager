@@ -12,6 +12,7 @@
   <ItemGroup>
     <!-- The profile code has no Windows dependency, so the tests run anywhere -->
     <Compile Include="..\..\ColorProfileEngine.cs" Link="ColorProfileEngine.cs" />
+    <Compile Include="..\..\RenoDx.cs" Link="RenoDx.cs" />
   </ItemGroup>
 
 </Project>

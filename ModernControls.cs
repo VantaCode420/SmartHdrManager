@@ -839,6 +839,249 @@ namespace SmartHdrManager
     // =========================================================================
     // Games list: owner-drawn rows with an on/off switch per game
     // =========================================================================
+    /// <summary>One row of an <see cref="ExeList"/>: exe name, a coloured tag (where it comes from) and its location.</summary>
+    public sealed class ExeListItem
+    {
+        public string Title { get; init; } = string.Empty;
+        public string Tag { get; init; } = string.Empty;
+        public Color TagColor { get; init; } = Theme.Muted;
+        public string? Path { get; init; }
+    }
+
+    /// <summary>
+    /// A short list of exes as rounded cards (Games tab › Options › Programs): exe icon, name, a tag on the right and the
+    /// full path below. Heights follow the fonts, so nothing is cut at 125–200 % scaling. Click or arrow keys select.
+    /// </summary>
+    public sealed class ExeList : Control
+    {
+        private List<ExeListItem> _items = new();
+        private int _selected = -1, _hover = -1, _offset;
+        private readonly Dictionary<string, Bitmap?> _icons = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _iconsLoading = new(StringComparer.OrdinalIgnoreCase);
+
+        public event EventHandler? SelectionChanged;
+
+        public ExeList()
+        {
+            SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
+            TabStop = true;
+            BackColor = Theme.Back;
+            ForeColor = Theme.Text;
+            Font = Theme.Body;
+        }
+
+        [Browsable(false), DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+        public int SelectedIndex
+        {
+            get => _selected;
+            set
+            {
+                int v = _items.Count == 0 ? -1 : Math.Clamp(value, -1, _items.Count - 1);
+                if (v == _selected) return;
+                _selected = v;
+                ScrollIntoView(v);
+                Invalidate();
+                SelectionChanged?.Invoke(this, EventArgs.Empty);
+            }
+        }
+
+        public void SetItems(IList<ExeListItem> items, int selected)
+        {
+            _items = new List<ExeListItem>(items);
+            _hover = -1;
+            _offset = Math.Clamp(_offset, 0, MaxOffset);
+            _selected = -2;   // always raise SelectionChanged
+            SelectedIndex = selected;
+        }
+
+        private int S(int v) => LogicalToDeviceUnits(v);
+        private int RowHeight => Theme.Semibold.Height + Theme.Small.Height + S(26);
+        private int Gap => S(8);
+        private int MaxOffset => Math.Max(0, _items.Count * (RowHeight + Gap) - Gap - ClientSize.Height);
+        private Rectangle RowRect(int i) => new(0, i * (RowHeight + Gap) - _offset, ClientSize.Width - (MaxOffset > 0 ? S(8) : 0), RowHeight);
+
+        private int IndexAt(Point p)
+        {
+            for (int i = 0; i < _items.Count; i++) if (RowRect(i).Contains(p)) return i;
+            return -1;
+        }
+
+        private void ScrollIntoView(int i)
+        {
+            if (i < 0) return;
+            var r = RowRect(i);
+            if (r.Top < 0) _offset += r.Top;
+            else if (r.Bottom > ClientSize.Height) _offset += r.Bottom - ClientSize.Height;
+            _offset = Math.Clamp(_offset, 0, MaxOffset);
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            int h = IndexAt(e.Location);
+            if (h != _hover) { _hover = h; Invalidate(); }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hover != -1) { _hover = -1; Invalidate(); }
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            Focus();
+            int i = IndexAt(e.Location);
+            if (i >= 0) SelectedIndex = i;
+        }
+
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            base.OnMouseWheel(e);
+            _offset = Math.Clamp(_offset - e.Delta * (RowHeight + Gap) / 240, 0, MaxOffset);
+            Invalidate();
+        }
+
+        protected override bool IsInputKey(Keys keyData) => keyData is Keys.Up or Keys.Down || base.IsInputKey(keyData);
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            base.OnKeyDown(e);
+            if (e.KeyCode == Keys.Down) SelectedIndex = Math.Min(_items.Count - 1, _selected + 1);
+            else if (e.KeyCode == Keys.Up) SelectedIndex = Math.Max(0, _selected - 1);
+        }
+
+        protected override void OnResize(EventArgs e)
+        {
+            base.OnResize(e);
+            _offset = Math.Clamp(_offset, 0, MaxOffset);
+        }
+
+        protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+        protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            var g = e.Graphics;
+            g.Clear(BackColor);
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            const TextFormatFlags line = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding | TextFormatFlags.VerticalCenter;
+
+            for (int i = 0; i < _items.Count; i++)
+            {
+                var item = _items[i];
+                Rectangle row = RowRect(i);
+                if (row.Bottom < 0 || row.Top > ClientSize.Height) continue;
+                bool selected = i == _selected, hover = i == _hover;
+
+                // The card
+                using (var path = Theme.RoundRect(new RectangleF(row.X + 0.5f, row.Y + 0.5f, row.Width - 1, row.Height - 1), S(10)))
+                {
+                    using (var brush = new SolidBrush(selected ? Theme.ButtonBack : hover ? Theme.SurfaceHover : Theme.Surface)) g.FillPath(brush, path);
+                    if (selected)
+                    {
+                        using var pen = new Pen(Color.FromArgb(Focused ? 200 : 120, Theme.Accent), Math.Max(1f, S(3) / 2f));
+                        g.DrawPath(pen, path);
+                    }
+                }
+
+                // Exe icon (or a letter)
+                int iconSize = S(32);
+                var iconRect = new Rectangle(row.X + S(16), row.Y + (row.Height - iconSize) / 2, iconSize, iconSize);
+                var icon = GetIcon(item.Path);
+                if (icon != null)
+                {
+                    g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                    g.DrawImage(icon, iconRect);
+                }
+                else GameList.DrawLetterIcon(g, iconRect, item.Title);
+
+                // Tag on the right, at the height of the name ("found automatically", "added by you" …)
+                int textX = iconRect.Right + S(14);
+                int nameHeight = Theme.Semibold.Height, pathHeight = Theme.Small.Height;
+                int top = row.Y + (row.Height - nameHeight - pathHeight - S(4)) / 2;
+                int right = row.Right - S(16);
+                if (item.Tag.Length > 0)
+                {
+                    Size tagText = TextRenderer.MeasureText(g, item.Tag, Theme.Small, Size.Empty, line);
+                    var tag = new Rectangle(right - tagText.Width - S(20), top + (nameHeight - tagText.Height - S(6)) / 2, tagText.Width + S(20), tagText.Height + S(6));
+                    using (var path = Theme.RoundRect(tag, tag.Height / 2f))
+                    using (var brush = new SolidBrush(Color.FromArgb(40, item.TagColor)))
+                        g.FillPath(brush, path);
+                    TextRenderer.DrawText(g, item.Tag, Theme.Small, tag, item.TagColor, line | TextFormatFlags.HorizontalCenter);
+                    TextRenderer.DrawText(g, item.Title, Theme.Semibold, new Rectangle(textX, top, Math.Max(0, tag.X - S(10) - textX), nameHeight),
+                                          Theme.Text, line | TextFormatFlags.EndEllipsis);
+                }
+                else
+                {
+                    TextRenderer.DrawText(g, item.Title, Theme.Semibold, new Rectangle(textX, top, Math.Max(0, right - textX), nameHeight),
+                                          Theme.Text, line | TextFormatFlags.EndEllipsis);
+                }
+
+                // Full path below, shortened in the middle when it doesn't fit
+                TextRenderer.DrawText(g, item.Path ?? "location not known", Theme.Small,
+                                      new Rectangle(textX, top + nameHeight + S(4), Math.Max(0, right - textX), pathHeight),
+                                      Theme.Muted, line | TextFormatFlags.PathEllipsis);
+            }
+
+            if (MaxOffset > 0)
+            {
+                float visible = ClientSize.Height, total = MaxOffset + visible;
+                float h = Math.Max(S(24), visible * visible / total);
+                float y = (visible - h) * _offset / MaxOffset;
+                using var path = Theme.RoundRect(new RectangleF(ClientSize.Width - S(5), y, S(4), h), S(2));
+                using var brush = new SolidBrush(Color.FromArgb(170, Theme.Border));
+                g.FillPath(brush, path);
+            }
+        }
+
+        /// <summary>Exe icon, loaded in the background (a sleeping disk must not freeze the dialog).</summary>
+        private Bitmap? GetIcon(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            if (_icons.TryGetValue(path, out var cached)) return cached;
+            if (!IsHandleCreated || !_iconsLoading.Add(path)) return null;
+            string file = path;
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                Bitmap? bmp = null;
+                try
+                {
+                    if (System.IO.File.Exists(file))
+                    {
+                        using var icon = Icon.ExtractAssociatedIcon(file);
+                        if (icon != null) bmp = icon.ToBitmap();
+                    }
+                }
+                catch { }
+                try
+                {
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (IsDisposed) { bmp?.Dispose(); return; }
+                        _icons[file] = bmp;
+                        _iconsLoading.Remove(file);
+                        Invalidate();
+                    }));
+                }
+                catch { bmp?.Dispose(); }
+            });
+            return null;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                foreach (var bmp in _icons.Values) bmp?.Dispose();
+                _icons.Clear();
+            }
+            base.Dispose(disposing);
+        }
+    }
+
     public sealed class GameItem
     {
         public GameItem(GameRow row)
@@ -1514,7 +1757,7 @@ namespace SmartHdrManager
         };
 
         /// <summary>Fallback when there is no exe icon: rounded square with the first letter of the name.</summary>
-        private static void DrawLetterIcon(Graphics g, RectangleF r, string name)
+        internal static void DrawLetterIcon(Graphics g, RectangleF r, string name)
         {
             int hash = 0;
             foreach (char c in name) hash = hash * 31 + c;

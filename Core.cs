@@ -188,6 +188,19 @@ namespace SmartHdrManager
         public bool AlwaysHdrMode { get; set; } = false;
         // When the app exits: keep HDR on (true) or go back to how it was when the app started (false)
         public bool AlwaysHdrKeepHdrOnExit { get; set; } = false;
+
+        // Games tab › Options › Programs: exes you added or removed for a library game (by library id). Applied after every
+        // scan, so a rescan never brings back an exe you removed or loses one you added.
+        public Dictionary<string, GameExeOverride> GameExeOverrides { get; set; } = new();
+    }
+
+    public sealed class GameExeOverride
+    {
+        public List<string> Added { get; set; } = new();     // full exe paths
+        public List<string> Removed { get; set; } = new();   // process names (exe without .exe, lower case)
+
+        [JsonIgnore]
+        public bool IsEmpty => Added.Count == 0 && Removed.Count == 0;
     }
 
     public sealed class GameOptions
@@ -207,7 +220,11 @@ namespace SmartHdrManager
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
         public int ScanVersion { get; set; }                    // GameLibraryScanner.CurrentScanVersion when it was detected
-        public bool RenoDx { get; set; }                        // the RenoDX add-on was found next to the game's exe (checked at every refresh)
+        public bool RenoDx { get; set; }                        // a RenoDX HDR mod was found for the game (checked at every refresh)
+        public string? RenoDxAddon { get; set; }                // its name, e.g. "cp2077" for renodx-cp2077.addon64
+        public List<string> ExePaths { get; set; } = new();     // full paths of the watched exes that are known (main exe first)
+        public List<string> DetectedProcesses { get; set; } = new();   // what the scan found, before learned launchers and your changes
+        public List<string> DetectedExePaths { get; set; } = new();
     }
 
     /// <summary>

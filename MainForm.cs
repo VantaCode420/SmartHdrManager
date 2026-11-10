@@ -1485,13 +1485,14 @@ namespace SmartHdrManager
             };
 
             dlg.SuspendLayout();
-            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 8, Margin = new Padding(0) };
+            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 9, Margin = new Padding(0) };
             table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, hintHeight));   // "closed right after HDR came on" hint
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));   // hint text for the delay (wraps; scales with DPI)
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 68));   // the exes the game is watched by
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));   // "Launch with HDR" buttons
             table.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));   // "Launch with HDR" hint
             table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
@@ -1523,6 +1524,43 @@ namespace SmartHdrManager
             table.Controls.Add(SettingRow("Keep HDR on after the game closes",
                 "No second black screen when you restart the game quickly.", keep), 0, 4);
 
+            // The exes the game is watched by (GitHub issue #11): library games get a list, other programs another exe
+            bool library = IsLibraryKey(item.Key);
+            var processes = new List<string>(item.Processes);
+            var changeExes = new ModernButton
+            {
+                Text = library ? "Change…" : "Change exe…", AutoSize = true, Margin = new Padding(0),
+                Enabled = !item.Excluded && processes.Count > 0   // a "Never HDR" row: restore it first
+            };
+            var exesRow = SettingRow("Programs this game runs as", ExesSummary(item, library), changeExes);
+            var exesDesc = (Label)exesRow.Controls[2];   // SettingRow: control, title, description
+            _toolTip.SetToolTip(changeExes, library
+                ? "If the game is watched by the wrong exe: add the right one, remove the wrong one"
+                : "Pick the program's exe again, e.g. after it was renamed or moved");
+            changeExes.Click += (_, _) =>
+            {
+                if (library)
+                {
+                    if (!EditGameExes(dlg, item.Key, item.Name)) return;
+                    processes = (_engine.GetGameExes(item.Key) ?? new List<GameExe>()).Select(x => x.Process).ToList();
+                }
+                else
+                {
+                    string? path = PickGameExe(dlg, $"Select the exe of '{item.Name}'", item.ExePath);
+                    if (path == null) return;
+                    string newProcess = HdrEngine.ProcessNameOf(path);
+                    string? other = _engine.GameUsingProcess(newProcess, item.Key);
+                    if (other != null && !newProcess.Equals(processes[0], StringComparison.OrdinalIgnoreCase) &&
+                        MessageBox.Show(dlg, $"{newProcess}.exe is already in your list ('{other}'). Use it for '{item.Name}' anyway?",
+                                        dlg.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                    _engine.ReplaceProgramExe(processes[0], path);
+                    processes = new List<string> { newProcess };
+                }
+                exesDesc.Text = library ? ExesSummary(item, true) : $"{processes[0]}.exe";
+                RebuildGames();
+            };
+            table.Controls.Add(exesRow, 0, 5);
+
             // "Launch with HDR": HDR on first, then the game starts (for games that only check HDR at startup)
             var launch = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(14, 8, 0, 0) };
             var copySteam = new ModernButton { Text = "Copy Steam launch option", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
@@ -1531,14 +1569,14 @@ namespace SmartHdrManager
             makeShortcut.Click += (_, _) => CreateHdrShortcut(dlg, item);
             launch.Controls.Add(copySteam);
             launch.Controls.Add(makeShortcut);
-            table.Controls.Add(launch, 0, 5);
+            table.Controls.Add(launch, 0, 6);
             table.Controls.Add(new Label
             {
                 Text = "Launch with HDR: HDR comes on first, then the game starts – for games that only offer HDR (or " +
                        "don't crash) when HDR is already on. Steam: paste into Properties › Launch options.",
                 Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.TopLeft, Margin = new Padding(18, 4, 18, 0)
-            }, 0, 6);
+            }, 0, 7);
 
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
             var save = new ModernButton { Text = "Save", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
@@ -1550,19 +1588,225 @@ namespace SmartHdrManager
             buttons.Controls.Add(save);
             buttons.Controls.Add(cancel);
             buttons.Controls.Add(reset);
-            table.Controls.Add(buttons, 0, 7);
+            table.Controls.Add(buttons, 0, 8);
 
             dlg.Controls.Add(table);
             dlg.AutoScaleDimensions = new SizeF(96F, 96F);
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
-            dlg.ClientSize = new Size(620, 436 + hintHeight);
+            dlg.ClientSize = new Size(620, 504 + hintHeight);
             dlg.ResumeLayout(false);
 
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-            _engine.SetGameOptions(item.Processes,
+            _engine.SetGameOptions(processes,
                 new GameOptions { HdrDelaySeconds = delay.Value, KeepHdrAfterExitSeconds = keep.Value }, item.Name);
             RebuildGames();
+        }
+
+        /// <summary>A Games tab row of a library game (not a program added by hand or found by the drive scan).</summary>
+        private static bool IsLibraryKey(string key) =>
+            !key.StartsWith("proc:", StringComparison.OrdinalIgnoreCase) && !key.StartsWith("never:", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>"acz.exe, acecombat8.exe · found automatically" for the Options dialog.</summary>
+        private string ExesSummary(GameItem item, bool library)
+        {
+            if (!library) return item.Processes.Count > 0 ? $"{item.Processes[0]}.exe" : string.Empty;
+            var exes = _engine.GetGameExes(item.Key) ?? new List<GameExe>();
+            bool changed = !_engine.GetGameExeOverride(item.Key).IsEmpty;
+            return string.Join(", ", exes.Select(x => x.Process + ".exe")) + (changed ? "  ·  changed by you" : "  ·  found automatically");
+        }
+
+        /// <summary>File dialog for one exe, starting in the game's folder. Null when cancelled or not a usable exe.</summary>
+        private static string? PickGameExe(IWin32Window owner, string title, string? nearExe)
+        {
+            string? start = null;
+            try
+            {
+                if (!string.IsNullOrEmpty(nearExe))
+                    start = HdrLauncher.GameFolder(nearExe) ?? Path.GetDirectoryName(nearExe);
+                if (start != null && !Directory.Exists(start)) start = null;
+            }
+            catch { start = null; }
+
+            using var dlg = new OpenFileDialog
+            {
+                Title = title,
+                Filter = "Programs (*.exe)|*.exe",
+                Multiselect = false,
+                InitialDirectory = start ?? string.Empty
+            };
+            if (dlg.ShowDialog(owner) != DialogResult.OK) return null;
+            string path = dlg.FileName;
+            string caption = "Smart HDR Manager";
+            if (!path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+            {
+                MessageBox.Show(owner, "Please pick a program (.exe) that exists.", caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return null;
+            }
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows).TrimEnd('\\');
+            if (windows.Length > 0 && path.StartsWith(windows + "\\", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(owner, "Programs in the Windows folder can't be used for a game: HDR would switch whenever Windows runs them.",
+                                caption, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return null;
+            }
+            return path;
+        }
+
+        /// <summary>
+        /// Games tab › Options › Programs: the exes a library game is watched by, with Add exe…, Remove and Reset to detected
+        /// (GitHub issue #11). Applied on Save; a rescan keeps the changes. True when something was saved.
+        /// </summary>
+        private bool EditGameExes(IWin32Window owner, string gameId, string gameName)
+        {
+            var draft = _engine.GetGameExeOverride(gameId);
+            string storedJson = System.Text.Json.JsonSerializer.Serialize(draft);
+            var entries = _engine.GetGameExes(gameId, draft) ?? new List<GameExe>();
+
+            using var dlg = new Form
+            {
+                Text = $"Programs – {gameName}",
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+                BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
+                Icon = _windowIcon, KeyPreview = true,
+                Padding = new Padding(16)
+            };
+            dlg.HandleCreated += (_, _) => Theme.StyleWindow(dlg.Handle);
+            dlg.KeyDown += (_, e) =>
+            {
+                if (e.KeyCode != Keys.Escape) return;
+                dlg.DialogResult = DialogResult.Cancel;
+                e.Handled = e.SuppressKeyPress = true;
+            };
+
+            dlg.SuspendLayout();
+            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 5, Margin = new Padding(0) };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));    // title + count
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));    // description (wraps; scales with DPI)
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // the exes
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));    // Add / Remove / Reset
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));    // Save / Cancel
+
+            // Title on the left, "2 exes" on the right (like the other lists)
+            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new Label
+            {
+                Text = "Programs this game runs as", Font = Theme.Section, ForeColor = Theme.Text, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Margin = new Padding(2, 0, 0, 0)
+            }, 0, 0);
+            var count = new Label { AutoSize = true, Font = Theme.Small, ForeColor = Theme.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(12, 0, 2, 0) };
+            header.Controls.Add(count, 1, 0);
+            table.Controls.Add(header, 0, 0);
+
+            table.Controls.Add(new Label
+            {
+                Text = "HDR comes on while one of these programs runs. Wrong exe? Add the game's real one – usually the largest " +
+                       "exe in its folder, often in Binaries\\Win64 – and remove the wrong one. Rescans keep your changes.",
+                Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill, UseMnemonic = false,
+                TextAlign = ContentAlignment.TopLeft, Margin = new Padding(2, 2, 2, 10)
+            }, 0, 1);
+
+            var list = new ExeList { Dock = DockStyle.Fill, Margin = new Padding(0) };
+            table.Controls.Add(list, 0, 2);
+            var actions = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0, 14, 0, 0) };
+            var add = new ModernButton { Text = "Add exe…", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            var remove = new ModernButton { Text = "Remove", AutoSize = true, Margin = new Padding(0, 0, 8, 0) };
+            var reset = new ModernButton { Glyph = Theme.GlyphRefresh, Text = "Reset to detected", AutoSize = true, Margin = new Padding(0) };
+            using var tips = new ToolTip();   // own tooltip: the main window's would keep the closed dialog's buttons alive
+            tips.SetToolTip(add, "Pick the exe that runs while you play");
+            tips.SetToolTip(remove, "Stop watching the selected exe for this game");
+            tips.SetToolTip(reset, "Back to the exes Smart HDR Manager found by itself");
+            actions.Controls.Add(add);
+            actions.Controls.Add(remove);
+            actions.Controls.Add(reset);
+            table.Controls.Add(actions, 0, 3);
+
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
+            var save = new ModernButton { Text = "Save", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            var cancel = new ModernButton { Text = "Cancel", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            save.Click += (_, _) => dlg.DialogResult = DialogResult.OK;
+            cancel.Click += (_, _) => dlg.DialogResult = DialogResult.Cancel;
+            buttons.Controls.Add(save);
+            buttons.Controls.Add(cancel);
+            table.Controls.Add(buttons, 0, 4);
+
+            void ShowEntries(string? select = null)
+            {
+                entries = _engine.GetGameExes(gameId, draft) ?? new List<GameExe>();
+                var rows = entries.Select(x => new ExeListItem
+                {
+                    Title = x.Process + ".exe",
+                    Path = x.Path,
+                    Tag = x.Origin switch { GameExeOrigin.Added => "added by you", GameExeOrigin.Learned => "learned from launcher", _ => "found automatically" },
+                    TagColor = x.Origin switch { GameExeOrigin.Added => Theme.Accent, GameExeOrigin.Learned => Theme.Warn, _ => Theme.Good }
+                }).ToList();
+                int index = select == null ? -1 : entries.FindIndex(x => x.Process.Equals(select, StringComparison.OrdinalIgnoreCase));
+                list.SetItems(rows, index >= 0 ? index : entries.Count > 0 ? 0 : -1);
+                count.Text = entries.Count == 1 ? "1 exe" : $"{entries.Count} exes";
+                if (!draft.IsEmpty) count.Text += " · changed by you";
+                remove.Enabled = entries.Count > 1;
+                reset.Enabled = !draft.IsEmpty;
+            }
+
+            add.Click += (_, _) =>
+            {
+                string? near = entries.Select(x => x.Path).FirstOrDefault(p => !string.IsNullOrEmpty(p));
+                string? path = PickGameExe(dlg, $"Select the exe that runs while you play '{gameName}'", near);
+                if (path == null) return;
+                string process = HdrEngine.ProcessNameOf(path);
+                if (entries.Any(x => x.Process.Equals(process, StringComparison.OrdinalIgnoreCase) &&
+                                     string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase)))
+                {
+                    MessageBox.Show(dlg, $"{process}.exe is already in the list.", dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                string? other = _engine.GameUsingProcess(process, gameId);
+                if (other != null && MessageBox.Show(dlg,
+                        $"{process}.exe is also watched for '{other}'. Both games would then use HDR whenever it runs.\n\nAdd it anyway?",
+                        dlg.Text, MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+                draft.Removed.RemoveAll(p => p.Equals(process, StringComparison.OrdinalIgnoreCase));
+                draft.Added.RemoveAll(p => p.Equals(path, StringComparison.OrdinalIgnoreCase));
+                draft.Added.Add(path);
+                ShowEntries(process);
+            };
+            remove.Click += (_, _) =>
+            {
+                if (list.SelectedIndex < 0 || list.SelectedIndex >= entries.Count) return;
+                if (entries.Count <= 1)
+                {
+                    MessageBox.Show(dlg, "A game needs at least one program. To stop HDR for this game, use Never HDR in the Games tab.",
+                                    dlg.Text, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+                string process = entries[list.SelectedIndex].Process;
+                draft.Added.RemoveAll(p => HdrEngine.ProcessNameOf(p).Equals(process, StringComparison.OrdinalIgnoreCase));
+                // Also found by the scan or learned: removed for good (until Reset)
+                if ((_engine.GetGameExes(gameId, draft) ?? new List<GameExe>()).Any(x => x.Process.Equals(process, StringComparison.OrdinalIgnoreCase)) &&
+                    !draft.Removed.Contains(process, StringComparer.OrdinalIgnoreCase))
+                    draft.Removed.Add(process);
+                ShowEntries();
+            };
+            reset.Click += (_, _) =>
+            {
+                draft = new GameExeOverride();
+                ShowEntries();
+            };
+            dlg.Controls.Add(table);
+            dlg.AutoScaleDimensions = new SizeF(96F, 96F);
+            dlg.AutoScaleMode = AutoScaleMode.Dpi;
+            dlg.ClientSize = new Size(660, 500);
+            dlg.ResumeLayout(false);
+            ShowEntries();
+
+            if (dlg.ShowDialog(owner) != DialogResult.OK) return false;
+            if (System.Text.Json.JsonSerializer.Serialize(draft) == storedJson) return false;
+            _engine.SetGameExeOverride(gameId, draft);
+            return true;
         }
 
         // ---- Launch with HDR ----

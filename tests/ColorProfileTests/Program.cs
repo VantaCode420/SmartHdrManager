@@ -26,8 +26,39 @@ internal static class Tests
         ValidatorTests();
         FileFormatTests();
         RealProfileTest();
+        RenoDxTests();
         Console.WriteLine($"{_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
+    }
+
+    // GitHub issue #9: only RenoDX HDR mods count, not its tools; ReShade.ini decides what is loaded
+    private static void RenoDxTests()
+    {
+        foreach (string tool in new[] { "devkit", "dlssfix", "fpslimiter", "dlss", "dlss5", "DLSS5", "mfgunlock", "universal_ue-dof-fix",
+                                        "dlss-fg", "framegen", "some_fov", "fps-limiter", "dofremover-dof", "ue-mfg", "unlockfps" })
+            Check(RenoDxAddons.IsTool(tool), $"RenoDX tool: {tool}");
+        foreach (string mod in new[] { "cp2077", "dyinglight", "horizonzdr-fwce", "unrealengine", "ue-extended", "unityengine", "sourceengine",
+                                       "fromsoft_engine", "duniaengine", "_ksp", "_hbr", "_p5s", "_univ", "re4", "dmc5", "ff7rebirth" })
+            Check(!RenoDxAddons.IsTool(mod), $"RenoDX HDR mod: {mod}");
+
+        Check(RenoDxAddons.IsAddonFile("renodx-cp2077.addon64") && RenoDxAddons.IsAddonFile("RenoDX-CP2077.ADDON32") &&
+              RenoDxAddons.IsAddonFile("renodx-x.addon"), "add-on extensions ReShade loads");
+        Check(!RenoDxAddons.IsAddonFile("renodx-cp2077.addon64.disabled") && !RenoDxAddons.IsAddonFile("renodx-cp2077.zip") &&
+              !RenoDxAddons.IsAddonFile("RenoDX-DLSS5-crash.log") && !RenoDxAddons.IsAddonFile("other-cp2077.addon64"),
+              "other files are no add-ons");
+        Check(RenoDxAddons.NameOf(@"C:\g\renodx-cp2077.addon64") == "cp2077" && RenoDxAddons.NameOf("renodx-_ksp.addon64") == "_ksp" &&
+              RenoDxAddons.NameOf("RenoDX-universal_ue-dof-fix.addon64") == "universal_ue-dof-fix", "add-on names");
+
+        // The format seen in real ReShade.ini files (comma list, "Name@file" entries)
+        var s = RenoDxAddons.ParseReShadeIni(
+            "[GENERAL]\r\nAddonPath=wrong\r\n[ADDON]\r\nDisabledAddons=Generic Depth,Effect Runtime Sync,DLSS 5 Neural Rendering@renodx-dlss5.addon64, @renodx-old.addon64\r\n" +
+            "AddonPath=..\\addons\r\nOverlayCollapsed=X@renodx-cp2077.addon64\r\n[OVERLAY]\r\nAddonPath=also wrong\r\n");
+        Check(s.AddonPath == "..\\addons", "AddonPath read from [ADDON] only");
+        Check(s.DisabledFiles.Count == 2 && s.DisabledFiles.Contains("renodx-dlss5.addon64") && s.DisabledFiles.Contains("RENODX-OLD.addon64"),
+              "DisabledAddons: file entries only, case-insensitive");
+        var empty = RenoDxAddons.ParseReShadeIni("[addon]\nDisabledAddons=\n; AddonPath=C:\\x\n");
+        Check(empty.AddonPath == null && empty.DisabledFiles.Count == 0, "empty settings and comments");
+        Check(RenoDxAddons.ParseReShadeIni("[ADDON]\nAddonPath=\"D:\\ReShade Addons\"\n").AddonPath == "D:\\ReShade Addons", "quoted absolute AddonPath");
     }
 
     private static void TransferFunctionTests()
