@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.7.0 – 2026-11
+
+### New
+- **RenoDX Games.** A new switch at the top of the Games tab turns HDR on automatically for every game with the RenoDX add-on (`renodx-*.addon64` / `.addon32`) next to its exe, in its game folder or in the Unreal folders `Binaries\Win64` / `WinGDK`. Games found later are covered after the next scan, and unchecking the switch turns those games off again. Games on *Never HDR* are skipped, and a game whose own switch you set keeps your choice. If the switch conflicts with those choices, a list of the games appears and you decide for each one whether to keep your choice or override it. When every RenoDX game has been turned off by hand, the switch turns itself off too. Off by default. Games with the add-on show "RenoDX" under their name, and searching for "renodx" lists them. Only file names are checked, for library games.
+
+### Fixed
+- **Deleted games leave the Games tab.** A game or program whose exe is gone was still listed, for games with HDR on as "Program". A game you uninstall now disappears the next time the games are read: when the app starts, when you open its window and with **Scan games**. Other programs disappear with the next **Scan games** or automatic scan, so one that was moved is found again first. A drive that is not connected, or a game folder that still holds other programs (for example during an update), does not count as deleted. If you reinstall a game, turn HDR on for it again (*RenoDX Games* covers its games by itself); *Never HDR* and game options are kept.
+- ***Reload config.json*** after a locked `config.json` at start-up: settings are saved again without restarting the app.
+- **Steam games no longer disappear when `libraryfolders.vdf` is busy.** The file is read without blocking Steam, with a few retries. If it still cannot be read, games in Steam's main folder stay listed and the log says so.
+- **A settings file that is briefly locked can no longer be replaced by default settings.** If `config.json` could not be read at start-up (for example while antivirus, a backup tool or another program had it open), the app treated it as damaged and saved default values over it. Now it tries again for a moment, and if the file still cannot be read it is left untouched: the app runs with default values, saves nothing until the next start or *Reload config.json*, and the log says so. A really damaged file is backed up before anything is replaced – under a new name if a backup already exists, and if no backup can be made the file is not overwritten.
+
 ## 2.6.2 – 2026-11
 
 ### New

@@ -174,6 +174,13 @@ namespace SmartHdrManager
         public bool ReloadColorProfileAfterSdr { get; set; } = false;
         public bool RequireKeywordForFullscreenVideo { get; set; } = true;
         public int SdrFallbackDelaySeconds { get; set; } = 3;
+
+        // ---- v2.7 ----
+        // Games tab › RenoDX Games: every game with the RenoDX add-on (renodx-*.addon64 / .addon32) uses HDR. A live rule on
+        // top of HdrGamesAndApps, which only ever holds the games turned on by hand. Off by default.
+        public bool AutoHdrForRenoDx { get; set; } = false;
+        // Library game ids of RenoDX games turned off by hand: the switch above does not apply to them
+        public List<string> RenoDxManualOff { get; set; } = new();
     }
 
     public sealed class GameOptions
@@ -193,6 +200,7 @@ namespace SmartHdrManager
         public List<string> Processes { get; set; } = new();    // process names (exe without .exe, lower case)
         public string? ExePath { get; set; }                    // main exe, used for the icon
         public int ScanVersion { get; set; }                    // GameLibraryScanner.CurrentScanVersion when it was detected
+        public bool RenoDx { get; set; }                        // the RenoDX add-on was found next to the game's exe (checked at every refresh)
     }
 
     /// <summary>

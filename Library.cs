@@ -130,6 +130,92 @@ namespace SmartHdrManager
                 .ToList();
         }
 
+        // ------------------------------------------------------------------
+        // RenoDX: a ReShade add-on, installed as "renodx-<name>.addon64" (or .addon32) next to the game's exe.
+        // Only file names are looked at (no file is opened), in the exe's folder, the folders above it up to the game
+        // folder and Unreal's Binaries folders – no search through the whole game folder, so a refresh stays fast.
+        // ------------------------------------------------------------------
+        public static void DetectRenoDx(IEnumerable<LibraryGame> games)
+        {
+            foreach (var game in games) game.RenoDx = HasRenoDx(game.ExePath);
+        }
+
+        private static bool HasRenoDx(string? exePath)
+        {
+            if (string.IsNullOrEmpty(exePath)) return false;
+            try
+            {
+                string? dir = Path.GetDirectoryName(Path.GetFullPath(exePath));
+                string? root = HdrLauncher.GameFolder(exePath)?.TrimEnd('\\');
+                for (int level = 0; level < 4 && dir != null; level++)
+                {
+                    if (HasRenoDxAddon(dir)) return true;
+                    // Stop at the game folder; for a game without a safe folder (drive root, shared "Games" folder)
+                    // only the exe's own folder counts
+                    if (root == null || dir.TrimEnd('\\').Equals(root, StringComparison.OrdinalIgnoreCase)) break;
+                    dir = Path.GetDirectoryName(dir);
+                }
+
+                // Unreal games: the main exe is often a small starter in the game folder, while the real game and its
+                // add-ons are in "<project>\Binaries\Win64" (or WinGDK for Game Pass builds)
+                if (root != null)
+                {
+                    foreach (string project in Directory.EnumerateDirectories(root).Prepend(root))
+                    {
+                        if (HasRenoDxAddon(Path.Combine(project, "Binaries", "Win64")) ||
+                            HasRenoDxAddon(Path.Combine(project, "Binaries", "WinGDK"))) return true;
+                    }
+                }
+            }
+            catch
+            {
+                // folder gone or not readable: no RenoDX
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// True only when an exe is certainly gone: its drive is connected, the nearest folder that still exists can be
+        /// read, and its game folder holds no other program. A disconnected drive or a protected folder (WindowsApps) says
+        /// nothing about the file, and a game folder with other exes may be in the middle of an update.
+        /// </summary>
+        public static bool IsDeleted(string exePath)
+        {
+            try
+            {
+                if (!Path.IsPathFullyQualified(exePath)) return false;
+                string full = Path.GetFullPath(exePath);
+                string? drive = Path.GetPathRoot(full);
+                if (string.IsNullOrEmpty(drive) || !Directory.Exists(drive) || File.Exists(full)) return false;
+
+                string? dir = Path.GetDirectoryName(full);
+                while (dir != null && !Directory.Exists(dir)) dir = Path.GetDirectoryName(dir);
+                if (dir == null) return false;
+                _ = Directory.EnumerateFileSystemEntries(dir).Any();   // throws when the folder cannot be read
+
+                string? gameFolder = HdrLauncher.GameFolder(full);
+                return gameFolder == null || !Directory.Exists(gameFolder) ||
+                       !ExesIn(gameFolder).Any(e => !IsExcludedExe(Path.GetFileNameWithoutExtension(e)));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>An unreadable folder counts as "no add-on here", so the other folders are still checked.</summary>
+        private static bool HasRenoDxAddon(string dir)
+        {
+            try { return Directory.Exists(dir) && Directory.EnumerateFiles(dir, "renodx*").Any(IsRenoDxAddon); }
+            catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException) { return false; }
+        }
+
+        private static bool IsRenoDxAddon(string file)
+        {
+            string ext = Path.GetExtension(file);
+            return ext.Equals(".addon64", StringComparison.OrdinalIgnoreCase) || ext.Equals(".addon32", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static void Try(Action action, string source, Action<string>? log)
         {
             try { action(); }
@@ -152,8 +238,12 @@ namespace SmartHdrManager
             string vdf = Path.Combine(steamPath, "steamapps", "libraryfolders.vdf");
             if (File.Exists(vdf))
             {
-                foreach (Match m in Regex.Matches(File.ReadAllText(vdf), "\"path\"\\s+\"(.+?)\""))
-                    libraries.Add(m.Groups[1].Value.Replace("\\\\", "\\"));
+                string? folders = ReadSharedText(vdf);
+                if (folders == null)
+                    _log?.Invoke("Steam: libraryfolders.vdf could not be read – only the games in Steam's main folder are listed until the next refresh.");
+                else
+                    foreach (Match m in Regex.Matches(folders, "\"path\"\\s+\"(.+?)\""))
+                        libraries.Add(m.Groups[1].Value.Replace("\\\\", "\\"));
             }
 
             var installed = new List<(uint AppId, string Name, string InstallDir, string Folder)>();
@@ -212,6 +302,28 @@ namespace SmartHdrManager
                     ? SteamLaunchExes(id, name, folder, installDir, app.Executables)
                     : FindGameExecutables(folder, name, installDir);
                 yield return Make(id, name, "Steam", exes);
+            }
+        }
+
+        /// <summary>
+        /// A text file that its launcher may be writing right now: read without blocking the launcher, with a few short
+        /// retries. Null when it still cannot be read.
+        /// </summary>
+        private static string? ReadSharedText(string path)
+        {
+            for (int attempt = 0; ; attempt++)
+            {
+                try
+                {
+                    using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(stream);
+                    return reader.ReadToEnd();
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    if (attempt >= 4) return null;
+                    System.Threading.Thread.Sleep(200);
+                }
             }
         }
 

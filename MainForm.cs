@@ -62,6 +62,8 @@ namespace SmartHdrManager
         private Label? _scanIntervalDesc;
         private Label? _neverHdrDesc;
         private readonly ToggleSwitch _swShowOthers = new();
+        private readonly ToggleSwitch _swRenoDx = new();
+        private readonly Label _renoDxCount = new();
         private readonly Stepper _minimumHdr = new() { Minimum = 0, Maximum = 120, Step = 5, ZeroText = "Off" };
         private readonly List<(MonitorInfo Monitor, ToggleSwitch Switch)> _monitorSwitches = new();
         private readonly ToggleSwitch _swBrowserWindowed = new();
@@ -257,12 +259,41 @@ namespace SmartHdrManager
 
         private Control BuildGamesPage()
         {
-            var page = new TableLayoutPanel { ColumnCount = 1, RowCount = 4, Margin = new Padding(0) };
+            var page = new TableLayoutPanel { ColumnCount = 1, RowCount = 5, Margin = new Padding(0) };
             page.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            page.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // RenoDX option
             page.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));    // hint + count
             page.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));    // search
             page.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // list
             page.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));    // buttons
+
+            // RenoDX option
+            const string renoDxTip = "Use HDR for every game with the RenoDX add-on in its folder.\n" +
+                                     "Never HDR games are skipped. If this conflicts with games you set yourself, you decide for each one.";
+            var renoDxRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 3, RowCount = 1, Margin = new Padding(0) };
+            renoDxRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            renoDxRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            renoDxRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            var renoDxLabel = new Label
+            {
+                Text = "RenoDX Games", Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = true, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(16, 0, 6, 0)
+            };
+            _renoDxCount.AutoSize = false;
+            _renoDxCount.AutoEllipsis = true;
+            _renoDxCount.Font = Theme.Small;
+            _renoDxCount.ForeColor = Theme.Muted;
+            _renoDxCount.Dock = DockStyle.Fill;
+            _renoDxCount.TextAlign = ContentAlignment.MiddleLeft;
+            _renoDxCount.Margin = new Padding(2, 0, 0, 0);
+            _swRenoDx.Anchor = AnchorStyles.Right;
+            _swRenoDx.Margin = new Padding(0);
+            _toolTip.SetToolTip(_swRenoDx, renoDxTip);
+            _toolTip.SetToolTip(renoDxLabel, renoDxTip);
+            renoDxRow.Controls.Add(_renoDxCount, 0, 0);
+            renoDxRow.Controls.Add(renoDxLabel, 1, 0);
+            renoDxRow.Controls.Add(_swRenoDx, 2, 0);
+            page.Controls.Add(renoDxRow, 0, 0);
 
             // Hint + count
             var hintRow = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 4, RowCount = 1, Margin = new Padding(0) };
@@ -289,7 +320,7 @@ namespace SmartHdrManager
             hintRow.Controls.Add(_gamesCount, 1, 0);
             hintRow.Controls.Add(othersLabel, 2, 0);
             hintRow.Controls.Add(_swShowOthers, 3, 0);
-            page.Controls.Add(hintRow, 0, 0);
+            page.Controls.Add(hintRow, 0, 1);
 
             // Search box: rounded field with a search icon
             var searchCard = new RoundedPanel
@@ -318,12 +349,12 @@ namespace SmartHdrManager
                 int x = S(40);
                 _search.SetBounds(x, Math.Max(0, (ch - _search.Height) / 2), Math.Max(0, searchCard.ClientSize.Width - x - S(12)), _search.Height);
             };
-            page.Controls.Add(searchCard, 0, 1);
+            page.Controls.Add(searchCard, 0, 2);
 
             // Game list card
             var listCard = new RoundedPanel { Radius = 12, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(6) };
             listCard.Controls.Add(_games);
-            page.Controls.Add(listCard, 0, 2);
+            page.Controls.Add(listCard, 0, 3);
 
             // Actions
             var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, WrapContents = false, Margin = new Padding(0, 12, 0, 0), Padding = new Padding(0) };
@@ -347,7 +378,7 @@ namespace SmartHdrManager
                 b.Margin = new Padding(0, 0, 8, 0);
                 buttons.Controls.Add(b);
             }
-            page.Controls.Add(buttons, 0, 3);
+            page.Controls.Add(buttons, 0, 4);
 
             return page;
         }
@@ -623,6 +654,7 @@ namespace SmartHdrManager
             _games.HdrToggled += (_, item) =>
             {
                 _engine.SetGameHdr(item.Processes, item.Hdr, item.Name);   // turning it on also undoes "Never HDR"
+                SyncRenoDxSwitch();
                 if (item.Excluded)
                 {
                     BeginInvoke(new Action(RebuildGames));   // not inside the list's own click handler
@@ -637,6 +669,25 @@ namespace SmartHdrManager
                 if (_loadingSettings) return;
                 _engine.Update(c => c.ShowOtherPrograms = _swShowOthers.Checked);
                 RebuildGames();
+            };
+            _swRenoDx.CheckedChanged += async (_, _) =>
+            {
+                if (_loadingSettings) return;
+                bool on = _swRenoDx.Checked;
+                _swRenoDx.Enabled = false;
+                try
+                {
+                    await Task.Run(() => _engine.SetAutoHdrForRenoDx(on));   // checks the game folders
+                    if (!IsDisposed) ResolveRenoDxConflicts(on);
+                }
+                finally
+                {
+                    if (!IsDisposed)
+                    {
+                        _swRenoDx.Enabled = true;
+                        RebuildGames();
+                    }
+                }
             };
             _minimumHdr.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.MinimumHdrSeconds = _minimumHdr.Value); };
             _hotkeyChoice.SelectedIndexChanged += (_, _) =>
@@ -756,6 +807,8 @@ namespace SmartHdrManager
                 LoadSettings();
                 RebuildGames();
                 Show();
+                // Games installed or deleted while the app ran in the tray; the list updates when this is done
+                _ = Task.Run(() => _engine.RefreshLibrary(fullRescan: false, quiet: true));
             }
             if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             TopMost = true; TopMost = false;   // reliably bring to front from a background process
@@ -921,6 +974,128 @@ namespace SmartHdrManager
             // Keeps the selection and scroll position
             _games.SetItems(items, _games.SelectedItem?.Key);
             UpdateGamesCount();
+
+            int renoDx = _engine.RenoDxGameCount();
+            if (_swRenoDx.Enabled) SyncRenoDxSwitch();   // Never HDR or Restore can turn it off; not while the switch itself is being changed
+            _renoDxCount.Text = renoDx == 0 ? "No games with the RenoDX add-on found"
+                              : renoDx == 1 ? "RenoDX add-on found in 1 game"
+                              : $"RenoDX add-on found in {renoDx} games";
+        }
+
+        /// <summary>
+        /// The RenoDX Games switch was just changed: lists the games whose own switch, set by hand, disagrees with it, so
+        /// the user decides per game. Closing the list keeps every choice. No conflict: nothing is shown.
+        /// </summary>
+        private void ResolveRenoDxConflicts(bool switchOn)
+        {
+            var conflicts = _engine.GetRenoDxConflicts();
+            if (conflicts.Count == 0) return;
+
+            var (dlg, list) = CreateRenoDxConflictDialog(conflicts, switchOn);
+            using (dlg)
+            {
+                if (dlg.ShowDialog(this) == DialogResult.OK)
+                    _engine.OverrideRenoDxChoices(list.Items.Where(i => i.Hdr).Select(i => i.Key).ToList());
+            }
+            _engine.TurnOffRenoDxIfAllOff();
+            SyncRenoDxSwitch();
+        }
+
+        /// <summary>Shows the state of the RenoDX Games switch after the engine changed it, without running its click logic.</summary>
+        private void SyncRenoDxSwitch()
+        {
+            bool on = _engine.Read(c => c.AutoHdrForRenoDx);
+            if (_swRenoDx.Checked == on) return;
+            bool wasLoading = _loadingSettings;
+            _loadingSettings = true;
+            try { _swRenoDx.Checked = on; }
+            finally { _loadingSettings = wasLoading; }
+        }
+
+        private (Form Dialog, GameList List) CreateRenoDxConflictDialog(List<GameRow> conflicts, bool switchOn)
+        {
+            var dlg = new Form
+            {
+                Text = "RenoDX Games",
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+                BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
+                Icon = _windowIcon, KeyPreview = true,
+                Padding = new Padding(16)
+            };
+            dlg.HandleCreated += (_, _) => Theme.StyleWindow(dlg.Handle);
+            dlg.KeyDown += (_, e) =>
+            {
+                if (e.KeyCode == Keys.Escape)
+                {
+                    dlg.DialogResult = DialogResult.Cancel;
+                    e.Handled = e.SuppressKeyPress = true;
+                }
+            };
+
+            dlg.SuspendLayout();
+            var table = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 4, Margin = new Padding(0) };
+            table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 40));    // title + count
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));    // description
+            table.RowStyles.Add(new RowStyle(SizeType.Percent, 100));    // the list
+            table.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));    // buttons
+
+            var header = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1, Margin = new Padding(0) };
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            header.Controls.Add(new Label
+            {
+                Text = "Games you set yourself", Font = Theme.Section, ForeColor = Theme.Text, Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft, AutoEllipsis = true, Margin = new Padding(2, 0, 0, 0)
+            }, 0, 0);
+            var count = new Label { AutoSize = true, Font = Theme.Small, ForeColor = Theme.Muted, Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleRight, Margin = new Padding(12, 0, 2, 0) };
+            header.Controls.Add(count, 1, 0);
+            table.Controls.Add(header, 0, 0);
+
+            table.Controls.Add(new Label
+            {
+                Text = switchOn
+                    ? "RenoDX Games is on, but you turned HDR off for these games. Turn on a game's switch to override your choice and use HDR for it."
+                    : "RenoDX Games is off, but you turned HDR on for these games. Turn on a game's switch to override your choice and turn its HDR off.",
+                Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, Dock = DockStyle.Fill, UseMnemonic = false,
+                TextAlign = ContentAlignment.TopLeft, AutoEllipsis = true, Margin = new Padding(2, 0, 2, 6)
+            }, 0, 1);
+
+            var listCard = new RoundedPanel { Radius = 12, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0), Padding = new Padding(6) };
+            var list = new GameList { Dock = DockStyle.Fill };
+            listCard.Controls.Add(list);
+            table.Controls.Add(listCard, 0, 2);
+
+            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 12, 0, 0) };
+            var done = new ModernButton { Text = "Done", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
+            var overrideAll = new ModernButton { Text = "Override all", AutoSize = true, Margin = new Padding(0) };
+            buttons.Controls.Add(done);
+            buttons.Controls.Add(overrideAll);
+            table.Controls.Add(buttons, 0, 3);
+
+            void UpdateCount()
+            {
+                int picked = list.Items.Count(i => i.Hdr);
+                count.Text = (list.Items.Count == 1 ? "1 game" : $"{list.Items.Count} games") + (picked > 0 ? $" · {picked} to override" : "");
+            }
+            list.HdrToggled += (_, _) => UpdateCount();
+            done.Click += (_, _) => dlg.DialogResult = DialogResult.OK;
+            overrideAll.Click += (_, _) =>
+            {
+                foreach (var item in list.Items) item.Hdr = true;
+                dlg.DialogResult = DialogResult.OK;
+            };
+
+            dlg.Controls.Add(table);
+            dlg.AutoScaleDimensions = new SizeF(96F, 96F);
+            dlg.AutoScaleMode = AutoScaleMode.Dpi;
+            dlg.ClientSize = new Size(560, Math.Clamp(200 + conflicts.Count * 50, 300, 500));
+            dlg.ResumeLayout(false);
+            list.SetItems(conflicts.Select(r => new GameItem(r)).ToArray(), null);
+            UpdateCount();
+            return (dlg, list);
         }
 
         private void UpdateGamesCount()
@@ -1814,6 +1989,7 @@ namespace SmartHdrManager
                 _scanInterval.Value = _engine.Read(c => c.DriveScanIntervalDays);
                 UpdateScanDescription();
                 _swShowOthers.Checked = _engine.Read(c => c.ShowOtherPrograms);
+                _swRenoDx.Checked = _engine.Read(c => c.AutoHdrForRenoDx);
                 _minimumHdr.Value = _engine.Read(c => c.MinimumHdrSeconds);
                 _hotkeyChoice.SelectedIndex = Math.Max(0, Array.IndexOf(HotkeyModes, _engine.Read(c => HotkeySettings.Normalize(c.HotkeyModifier))));
 

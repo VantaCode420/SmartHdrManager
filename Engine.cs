@@ -140,6 +140,18 @@ namespace SmartHdrManager
                 HdrGames = new HashSet<string>(c.HdrGamesAndApps ?? new List<string>(), Cmp);
                 Ignored = new HashSet<string>(c.IgnoredGames ?? new List<string>(), Cmp);
 
+                // "RenoDX Games": applied here and shown in GetGameRows; nothing is copied into the user's own HDR list
+                if (c.AutoHdrForRenoDx)
+                {
+                    var manualOff = new HashSet<string>(c.RenoDxManualOff ?? new List<string>(), Cmp);
+                    foreach (var game in c.LibraryGames ?? new List<LibraryGame>())
+                    {
+                        if (!game.RenoDx || manualOff.Contains(game.Id)) continue;
+                        foreach (string p in game.Processes)
+                            if (!Ignored.Contains(p)) HdrGames.Add(p);
+                    }
+                }
+
                 // Apps tab (2.6): one mode per program; "off" = the program is not touched at all
                 ForceSdr = new HashSet<string>(Cmp);
                 Browsers = new HashSet<string>(Cmp);
@@ -470,6 +482,8 @@ namespace SmartHdrManager
                     CustomGameFolders = c.CustomGameFolders,
                     LastDriveScanUtc = c.LastDriveScanUtc,
                     ShowOtherPrograms = c.ShowOtherPrograms,
+                    AutoHdrForRenoDx = c.AutoHdrForRenoDx,
+                    RenoDxManualOff = c.RenoDxManualOff,
                     BrowserScriptSeenUtc = c.BrowserScriptSeenUtc,
                     HdrPlayerPaths = c.HdrPlayerPaths,
                     LauncherGames = c.LauncherGames,
@@ -688,15 +702,18 @@ namespace SmartHdrManager
 
         private readonly object _libraryLock = new();
 
-        public void RefreshLibrary(bool fullRescan)
+        /// <param name="quiet">Opening the window: saves, logs and tells the UI only when something really changed.</param>
+        public void RefreshLibrary(bool fullRescan, bool quiet = false)
         {
             lock (_libraryLock)   // startup refresh, startup scan and the Scan button never run at the same time
             try
             {
                 Dictionary<string, LibraryGame>? previous = null;
                 HashSet<string> apps;
+                Dictionary<string, List<string>> lastPaths;
                 lock (Sync)
                 {
+                    lastPaths = KnownLocations(allPrograms: false);   // other programs: after the drive scan, see ScanDrives
                     // Copies: the scan runs outside the lock, while the engine thread may add a learned launcher game
                     if (!fullRescan)
                         previous = (Config.LibraryGames ?? new List<LibraryGame>())
@@ -705,8 +722,11 @@ namespace SmartHdrManager
                 }
 
                 var games = GameLibraryScanner.Scan(previous, msg => Log("SCAN", msg), apps);
+                GameLibraryScanner.DetectRenoDx(games);   // not cached: an add-on installed later shows up at the next refresh
                 var knownPaths = GameLibraryScanner.FindKnownExePaths();
+                var deleted = FindDeletedPrograms(lastPaths, games, knownPaths);   // file checks outside the lock
                 int iconsFound = 0;
+                bool changed;
                 lock (Sync)
                 {
                     MergeLearnedLaunchers(games);
@@ -714,6 +734,8 @@ namespace SmartHdrManager
                     var covered = new HashSet<string>(games.Where(g => g.Source != "Game Bar").SelectMany(g => g.Processes), Cmp);
                     games.RemoveAll(g => g.Source == "Game Bar" && g.Processes.Any(covered.Contains));
                     CarryOverGameSettings(Config.LibraryGames ?? new List<LibraryGame>(), games);
+                    RemoveDeletedPrograms(Config.LibraryGames ?? new List<LibraryGame>(), games, deleted);
+                    changed = deleted.Count > 0 || JsonSerializer.Serialize(Config.LibraryGames) != JsonSerializer.Serialize(games);
                     Config.LibraryGames = games;
                     InvalidateSnapshot();
 
@@ -732,6 +754,8 @@ namespace SmartHdrManager
                             iconsFound++;
                         }
                     }
+                    changed |= iconsFound > 0;
+                    if (quiet && !changed) return;
                     Save();
                 }
                 if (iconsFound > 0) Log("SCAN", $"Program locations found for {iconsFound} program(s) (icons).");
@@ -744,10 +768,233 @@ namespace SmartHdrManager
             }
         }
 
+        /// <summary>
+        /// Process name -> every exe location known for it: of the library games, or of every program the Games tab can list.
+        /// A second location matters when another program has the same process name. Caller holds Sync.
+        /// </summary>
+        private Dictionary<string, List<string>> KnownLocations(bool allPrograms)
+        {
+            var result = new Dictionary<string, List<string>>(Cmp);
+            void Add(string process, string? path)
+            {
+                if (string.IsNullOrEmpty(path)) return;
+                if (!result.TryGetValue(process, out var paths)) result[process] = paths = new List<string>();
+                if (!paths.Contains(path, Cmp)) paths.Add(path);
+            }
+
+            foreach (var game in Config.LibraryGames ?? new List<LibraryGame>())
+                foreach (string p in game.Processes) Add(p, game.ExePath);
+            var names = allPrograms ? result.Keys.Concat(Config.HdrGamesAndApps).Concat(Config.DiscoveredGames).ToList() : result.Keys.ToList();
+            foreach (string p in names)
+                if (Config.ProgramPaths.TryGetValue(p, out var path)) Add(p, path);
+            return result;
+        }
+
+        /// <summary>
+        /// Programs that are in no game library any more and whose every known exe is really gone (see
+        /// <see cref="GameLibraryScanner.IsDeleted"/>). Process name -> the exe, for the log.
+        /// </summary>
+        private static Dictionary<string, string> FindDeletedPrograms(Dictionary<string, List<string>> locations, List<LibraryGame> games,
+                                                                      Dictionary<string, string> foundElsewhere)
+        {
+            var inLibrary = new HashSet<string>(games.SelectMany(g => g.Processes), Cmp);
+            var deleted = new Dictionary<string, string>(Cmp);
+            foreach (var (process, paths) in locations)
+                if (!inLibrary.Contains(process) && !foundElsewhere.ContainsKey(process) && paths.All(GameLibraryScanner.IsDeleted))
+                    deleted[process] = paths[0];
+            return deleted;
+        }
+
+        /// <summary>
+        /// Takes deleted games out of the HDR and found-programs lists, so they leave the Games tab. "Never HDR" and the game
+        /// options are kept: they matter again if the game is reinstalled. Caller holds Sync.
+        /// </summary>
+        private void RemoveDeletedPrograms(List<LibraryGame> oldGames, List<LibraryGame> newGames, Dictionary<string, string> deleted)
+        {
+            foreach (var game in newGames)     // includes the launcher games merged in after the file checks
+                foreach (string p in game.Processes) deleted.Remove(p);
+            if (deleted.Count == 0) return;
+
+            var names = oldGames.SelectMany(g => g.Processes.Select(p => (Process: p, g.Name)))
+                                .GroupBy(x => x.Process, Cmp).ToDictionary(x => x.Key, x => x.First().Name, Cmp);
+            int others = 0;
+            foreach (var (process, path) in deleted)
+            {
+                bool hadHdr = Config.HdrGamesAndApps.RemoveAll(n => n.Equals(process, StringComparison.OrdinalIgnoreCase)) > 0;
+                Config.DiscoveredGames.RemoveAll(n => n.Equals(process, StringComparison.OrdinalIgnoreCase));
+                Config.ProgramPaths.Remove(process);
+                if (hadHdr) Log("LIST", $"- '{(names.TryGetValue(process, out var name) ? name : process)}' was deleted and is no longer listed ({path} is gone).");
+                else others++;
+            }
+            if (others > 0) Log("SCAN", $"{others} deleted program(s) removed from the found programs.");
+
+            // A reinstalled game counts as new for "RenoDX Games"
+            var stillListed = new HashSet<string>(newGames.Select(g => g.Id), Cmp);
+            foreach (var game in oldGames)
+                if (!stillListed.Contains(game.Id) && game.Processes.Any(deleted.ContainsKey))
+                    Config.RenoDxManualOff.RemoveAll(id => id.Equals(game.Id, StringComparison.OrdinalIgnoreCase));
+        }
+
         private static LibraryGame CopyOf(LibraryGame g) => new()
         {
-            Id = g.Id, Name = g.Name, Source = g.Source, Processes = new List<string>(g.Processes), ExePath = g.ExePath, ScanVersion = g.ScanVersion
+            Id = g.Id, Name = g.Name, Source = g.Source, Processes = new List<string>(g.Processes), ExePath = g.ExePath, ScanVersion = g.ScanVersion,
+            RenoDx = g.RenoDx
         };
+
+        /// <summary>True when the "RenoDX Games" switch makes this game use HDR. Caller holds Sync.</summary>
+        private bool RenoDxCovers(LibraryGame game, HashSet<string> manualOff) =>
+            Config.AutoHdrForRenoDx && game.RenoDx && !manualOff.Contains(game.Id);
+
+        /// <summary>
+        /// A RenoDX game's own switch was set by hand: from now on the "RenoDX Games" switch leaves that game alone. On is
+        /// remembered by the HDR list itself, off here. Caller holds Sync.
+        /// </summary>
+        private void RememberRenoDxChoice(ICollection<string> processes, bool on)
+        {
+            foreach (var game in Config.LibraryGames)
+            {
+                if (!game.RenoDx || !game.Processes.Any(p => processes.Contains(p, Cmp))) continue;
+                Config.RenoDxManualOff.RemoveAll(id => id.Equals(game.Id, StringComparison.OrdinalIgnoreCase));
+                if (!on) Config.RenoDxManualOff.Add(game.Id);
+            }
+        }
+
+        /// <summary>
+        /// "RenoDX Games" turns itself off once every RenoDX game is off by hand ("Never HDR" games do not count), so it never
+        /// says "on" with nothing on. The choices made by hand stay: turning it back on lists them. Caller holds Sync.
+        /// </summary>
+        private bool SwitchOffRenoDxIfAllOff()
+        {
+            if (!Config.AutoHdrForRenoDx) return false;
+            var games = RenoDxGames();
+            if (games.Count == 0 || games.Any(g => g.On)) return false;
+            Config.AutoHdrForRenoDx = false;
+            Log("LIST", "RenoDX Games: off – every RenoDX game is turned off by hand.");
+            return true;
+        }
+
+        /// <summary>A game's HDR choice was changed by hand: only a RenoDX game can make the switch turn itself off. Caller holds Sync.</summary>
+        private void SwitchOffRenoDxAfterChange(ICollection<string> processes)
+        {
+            if (Config.LibraryGames.Any(g => g.RenoDx && g.Processes.Any(p => processes.Contains(p, Cmp))))
+                SwitchOffRenoDxIfAllOff();
+        }
+
+        /// <summary>
+        /// The RenoDX games with their processes that are not on "Never HDR" (games fully on it are left out) and whether
+        /// each one uses HDR right now. Caller holds Sync.
+        /// </summary>
+        private List<(LibraryGame Game, List<string> Processes, bool On)> RenoDxGames()
+        {
+            var hdr = new HashSet<string>(Config.HdrGamesAndApps, Cmp);
+            var ignored = new HashSet<string>(Config.IgnoredGames, Cmp);
+            var manualOff = new HashSet<string>(Config.RenoDxManualOff, Cmp);
+            var games = new List<(LibraryGame, List<string>, bool)>();
+            foreach (var game in Config.LibraryGames)
+            {
+                if (!game.RenoDx) continue;
+                var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
+                if (procs.Count > 0) games.Add((game, procs, procs.Any(hdr.Contains) || RenoDxCovers(game, manualOff)));
+            }
+            return games;
+        }
+
+        /// <summary>After the conflict list: if every RenoDX game was kept off, the switch goes back off.</summary>
+        public void TurnOffRenoDxIfAllOff()
+        {
+            lock (Sync)
+            {
+                if (!SwitchOffRenoDxIfAllOff()) return;
+                InvalidateSnapshot();
+                Save();
+            }
+        }
+
+        /// <summary>
+        /// Turns "RenoDX Games" on or off. It only applies to games whose own switch was never set by hand and is worked out
+        /// live, so there is nothing to undo. Turning it on checks the game folders right away.
+        /// </summary>
+        public void SetAutoHdrForRenoDx(bool enabled)
+        {
+            List<LibraryGame> games;
+            lock (Sync)
+            {
+                Config.AutoHdrForRenoDx = enabled;
+                games = Config.LibraryGames.Select(CopyOf).ToList();
+            }
+            if (enabled) GameLibraryScanner.DetectRenoDx(games);   // file checks outside the lock
+
+            int renoDxGames;
+            lock (Sync)
+            {
+                if (enabled)
+                {
+                    var found = games.GroupBy(g => g.Id, Cmp).ToDictionary(g => g.Key, g => g.First().RenoDx, Cmp);
+                    foreach (var g in Config.LibraryGames)
+                        if (found.TryGetValue(g.Id, out bool renoDx)) g.RenoDx = renoDx;
+                }
+                renoDxGames = Config.LibraryGames.Count(g => g.RenoDx);
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("INFO", $"RenoDX Games: {(enabled ? "on" : "off")} – {renoDxGames} RenoDX game(s) found; games set by hand are not affected.");
+        }
+
+        /// <summary>
+        /// RenoDX games whose own switch, set by hand, disagrees with the "RenoDX Games" switch as it is now. Key = library
+        /// game id. "Never HDR" games are skipped. Only a choice made by hand can disagree with the switch.
+        /// </summary>
+        public List<GameRow> GetRenoDxConflicts()
+        {
+            lock (Sync)
+            {
+                var rows = new List<GameRow>();
+                foreach (var (game, procs, on) in RenoDxGames())
+                {
+                    if (on == Config.AutoHdrForRenoDx) continue;
+                    rows.Add(new GameRow
+                    {
+                        Key = game.Id,
+                        Name = game.Name,
+                        Subtitle = $"{game.Source}  ·  you turned HDR {(on ? "on" : "off")}",
+                        Processes = procs,
+                        ExePath = game.ExePath
+                    });
+                }
+                return rows.OrderBy(r => r.Name, Cmp).ToList();
+            }
+        }
+
+        /// <summary>
+        /// Forgets the choice made by hand for these RenoDX games (library ids), so they follow the "RenoDX Games" switch
+        /// again. Only runs for the games the user picked in the conflict list.
+        /// </summary>
+        public void OverrideRenoDxChoices(ICollection<string> gameIds)
+        {
+            if (gameIds.Count == 0) return;
+            var names = new List<string>();
+            bool on;
+            lock (Sync)
+            {
+                foreach (var (game, procs, _) in RenoDxGames())
+                {
+                    if (!gameIds.Contains(game.Id, Cmp)) continue;
+                    Config.HdrGamesAndApps.RemoveAll(n => procs.Contains(n, Cmp));
+                    Config.RenoDxManualOff.RemoveAll(id => id.Equals(game.Id, StringComparison.OrdinalIgnoreCase));
+                    names.Add(game.Name);
+                }
+                on = Config.AutoHdrForRenoDx;
+                InvalidateSnapshot();
+                Save();
+            }
+            Log("LIST", $"RenoDX Games: HDR {(on ? "on" : "off")} for {string.Join(", ", names.Select(n => $"'{n}'"))} – choice made by hand overridden.");
+        }
+
+        /// <summary>Number of library games with the RenoDX add-on, as of the last refresh.</summary>
+        public int RenoDxGameCount()
+        {
+            lock (Sync) return (Config.LibraryGames ?? new List<LibraryGame>()).Count(g => g.RenoDx);
+        }
 
         /// <summary>Adds the game processes learned from launchers (LauncherGames) to their library games. Caller holds Sync.</summary>
         private void MergeLearnedLaunchers(List<LibraryGame> games)
@@ -2391,7 +2638,8 @@ namespace SmartHdrManager
                     Config.LauncherGames[launcher] = games = new List<string>();
                 if (!games.Contains(game, Cmp)) games.Add(game);
 
-                if (!Config.HdrGamesAndApps.Contains(game, Cmp))
+                // Only when the launcher was turned on by hand: under "RenoDX Games" the game follows through its library entry below
+                if (Config.HdrGamesAndApps.Contains(launcher, Cmp) && !Config.HdrGamesAndApps.Contains(game, Cmp))
                 {
                     Config.HdrGamesAndApps.Add(game);
                     Config.HdrGamesAndApps.Sort(Cmp);
@@ -2826,6 +3074,7 @@ namespace SmartHdrManager
             {
                 var hdr = new HashSet<string>(Config.HdrGamesAndApps ?? new List<string>(), Cmp);
                 var ignored = new HashSet<string>(Config.IgnoredGames ?? new List<string>(), Cmp);
+                var manualOff = new HashSet<string>(Config.RenoDxManualOff ?? new List<string>(), Cmp);
                 var options = Config.PerGameOptions ?? new Dictionary<string, GameOptions>();
                 var paths = Config.ProgramPaths ?? new Dictionary<string, string>();
                 bool HasOptions(IEnumerable<string> procs) =>
@@ -2840,16 +3089,17 @@ namespace SmartHdrManager
                     var procs = game.Processes.Where(p => !ignored.Contains(p)).ToList();
                     if (procs.Count == 0) continue;
 
+                    string renoDx = game.RenoDx ? "  ·  RenoDX" : string.Empty;
                     rows.Add(new GameRow
                     {
                         Key = game.Id,
                         Name = game.Name,
-                        Subtitle = procs.Count > 1 ? $"{game.Source}  ·  {procs[0]}.exe +{procs.Count - 1}" : $"{game.Source}  ·  {procs[0]}.exe",
+                        Subtitle = (procs.Count > 1 ? $"{game.Source}  ·  {procs[0]}.exe +{procs.Count - 1}" : $"{game.Source}  ·  {procs[0]}.exe") + renoDx,
                         Processes = procs,
                         // library path, or one learned from the drive scan / a running game (e.g. Xbox games)
                         ExePath = game.ExePath ?? procs.Select(p => paths.TryGetValue(p, out var known) ? known : null)
                                                       .FirstOrDefault(p => p != null),
-                        Hdr = procs.Any(hdr.Contains),
+                        Hdr = procs.Any(hdr.Contains) || RenoDxCovers(game, manualOff),
                         HasOptions = HasOptions(procs)
                     });
                 }
@@ -2936,6 +3186,9 @@ namespace SmartHdrManager
             {
                 foreach (var name in list)
                     Config.IgnoredGames.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
+                // HDR stays off until the game is turned on, also under "RenoDX Games"
+                RememberRenoDxChoice(list, on: false);
+                SwitchOffRenoDxAfterChange(list);
                 InvalidateSnapshot();
                 Save();
             }
@@ -2961,6 +3214,8 @@ namespace SmartHdrManager
                         Config.HdrGamesAndApps.RemoveAll(g => g.Equals(name, StringComparison.OrdinalIgnoreCase));
                     }
                 }
+                RememberRenoDxChoice(list, enabled);
+                if (!enabled) SwitchOffRenoDxAfterChange(list);
                 Config.HdrGamesAndApps.Sort(Cmp);
                 InvalidateSnapshot();
                 Save();
@@ -2979,6 +3234,7 @@ namespace SmartHdrManager
                     if (!Config.IgnoredGames.Contains(name, Cmp))
                         Config.IgnoredGames.Add(name);
                 }
+                SwitchOffRenoDxAfterChange(list);
                 InvalidateSnapshot();
                 Save();
             }
@@ -3160,6 +3416,7 @@ namespace SmartHdrManager
                 {
                     Log("LIST", $"'{procName}' is already in the HDR list");
                 }
+                RememberRenoDxChoice(new[] { procName }, on: true);
                 if (!string.IsNullOrEmpty(exePath) && File.Exists(exePath))
                     Config.ProgramPaths[procName] = exePath;   // used for the icon in the Games tab
                 InvalidateSnapshot();
@@ -3186,6 +3443,7 @@ namespace SmartHdrManager
                 Config.HdrGamesAndApps.RemoveAll(g => g.Equals(procName, StringComparison.OrdinalIgnoreCase));
                 if (!Config.IgnoredGames.Contains(procName, Cmp))
                     Config.IgnoredGames.Add(procName);
+                SwitchOffRenoDxAfterChange(new[] { procName });
                 InvalidateSnapshot();
                 Save();
                 reload = Config.ReloadColorProfileAfterSdr;
@@ -3266,6 +3524,25 @@ namespace SmartHdrManager
                     Config.LastDriveScanUtc = DateTime.UtcNow;
                     Save();
                 }
+                // Programs outside the libraries: only now, with the scan's results, so that one that was moved is not taken for deleted
+                List<LibraryGame> library;
+                Dictionary<string, List<string>> locations;
+                lock (Sync)
+                {
+                    library = Config.LibraryGames.Select(CopyOf).ToList();
+                    locations = KnownLocations(allPrograms: true);
+                }
+                var deleted = FindDeletedPrograms(locations, library, foundPaths);
+                if (deleted.Count > 0)
+                {
+                    lock (Sync)
+                    {
+                        RemoveDeletedPrograms(Config.LibraryGames, Config.LibraryGames, deleted);
+                        InvalidateSnapshot();
+                        Save();
+                    }
+                }
+
                 Log("SCAN", $"{added} new programs found by the drive scan.");
                 return added;
             }
@@ -3308,6 +3585,9 @@ namespace SmartHdrManager
                     foreach (var prop in typeof(AppConfig).GetProperties())
                         if (prop.CanWrite) prop.SetValue(Config, prop.GetValue(fresh));
                     InvalidateSnapshot();
+                    // The file is readable now and the settings in memory are the ones from the file: safe to save again
+                    _configUnsafeToSave = false;
+                    _saveBlockedLogged = false;
                 }
                 Log("CONFIG", "config.json reloaded.");
                 return true;
@@ -3322,20 +3602,69 @@ namespace SmartHdrManager
         // ------------------------------------------------------------------
         // Config load / save (same JSON format as before)
         // ------------------------------------------------------------------
+        // A config.json that exists but could not be read or safely set aside must never be overwritten with defaults:
+        // while this is set, Save() does nothing (the file on disk stays exactly as it was).
+        private bool _configUnsafeToSave;
+        private bool _saveBlockedLogged;
+        private const int ConfigReadAttempts = 5;
+        private const int ConfigReadRetryMs = 300;
+
         private AppConfig LoadOrCreateConfig()
         {
             if (!File.Exists(ConfigPath))
                 return Normalize(new AppConfig());
 
+            // A short read error (antivirus scan, backup tool, another program holding the file) is not a damaged file:
+            // try again for a moment, then keep the file untouched instead of replacing it with default values.
+            string? json = null;
+            Exception? readError = null;
+            for (int attempt = 0; attempt < ConfigReadAttempts && json == null; attempt++)
+            {
+                try
+                {
+                    using var fs = new FileStream(ConfigPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    using var reader = new StreamReader(fs);
+                    json = reader.ReadToEnd();
+                }
+                catch (Exception ex) when (ex is FileNotFoundException || ex is DirectoryNotFoundException)
+                {
+                    return Normalize(new AppConfig());   // the file disappeared meanwhile: same as a first start
+                }
+                catch (Exception ex) when (ex is IOException || ex is UnauthorizedAccessException)
+                {
+                    readError = ex;
+                    if (attempt < ConfigReadAttempts - 1) Thread.Sleep(ConfigReadRetryMs);
+                }
+            }
+
+            if (json == null)
+            {
+                _configUnsafeToSave = true;
+                Log("ERROR", $"config.json could not be read ({readError?.Message}). Using default values for now; your settings file is left " +
+                             "untouched and nothing is saved until the app is restarted.");
+                return Normalize(new AppConfig());
+            }
+
             try
             {
-                string json = File.ReadAllText(ConfigPath);
                 return Normalize(JsonSerializer.Deserialize<AppConfig>(json) ?? new AppConfig());
             }
             catch (Exception ex)
             {
-                try { File.Copy(ConfigPath, ConfigPath + ".bak", true); } catch { }
-                Log("ERROR", $"config.json unreadable ({ex.Message}) – backup saved as config.json.bak, using default values.");
+                // Really damaged (not just locked): set it aside under a name that never overwrites an earlier backup
+                string backup = ConfigPath + ".bak";
+                if (File.Exists(backup)) backup = $"{ConfigPath}.{DateTime.Now:yyyyMMdd-HHmmss}.bak";
+                try
+                {
+                    File.Copy(ConfigPath, backup, false);
+                    Log("ERROR", $"config.json unreadable ({ex.Message}) – backup saved as {Path.GetFileName(backup)}, using default values.");
+                }
+                catch (Exception copyError)
+                {
+                    _configUnsafeToSave = true;   // no backup = do not overwrite the only copy
+                    Log("ERROR", $"config.json unreadable ({ex.Message}) and no backup could be made ({copyError.Message}). Using default values; " +
+                                 "the file is left untouched and nothing is saved until the app is restarted.");
+                }
                 return Normalize(new AppConfig());
             }
         }
@@ -3354,6 +3683,7 @@ namespace SmartHdrManager
             c.SelectedMonitors ??= new List<string>();
             c.LibraryGames ??= new List<LibraryGame>();
             c.HdrPlayerPaths ??= new List<string>();
+            c.RenoDxManualOff ??= new List<string>();
 
             // Case-insensitive keys (process names), also after loading from JSON
             var options = new Dictionary<string, GameOptions>(StringComparer.OrdinalIgnoreCase);
@@ -3418,6 +3748,17 @@ namespace SmartHdrManager
         /// <summary>Caller must hold <see cref="Sync"/> (or be in the constructor).</summary>
         private void Save()
         {
+            if (_configUnsafeToSave)
+            {
+                if (!_saveBlockedLogged)
+                {
+                    _saveBlockedLogged = true;
+                    Log("ERROR", "Settings are not being saved: config.json could not be read at startup and was left untouched. " +
+                                 "Close any program that has it open, then restart the app.");
+                }
+                return;
+            }
+
             try
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(ConfigPath)!);
