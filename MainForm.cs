@@ -59,12 +59,13 @@ namespace SmartHdrManager
             Stops = new[] { -1, 0, 1, 7, 30 },
             Format = v => v switch { < 0 => "Off", 0 => "Each start", 1 => "Daily", 7 => "Weekly", 30 => "Monthly", _ => $"{v} days" }
         };
-        private Label? _scanIntervalDesc;
-        private Label? _neverHdrDesc;
+        private SettingText? _scanIntervalDesc;
+        private SettingText? _neverHdrDesc;
         private readonly ToggleSwitch _swShowOthers = new();
         private readonly ToggleSwitch _swRenoDx = new();
         private readonly Label _renoDxCount = new();
         private readonly Stepper _minimumHdr = new() { Minimum = 0, Maximum = 120, Step = 5, ZeroText = "Off" };
+        private readonly Stepper _shadowLift = new() { Minimum = 0, Maximum = 100, Step = 5, Suffix = " %", ZeroText = "Off" };
         private readonly List<(MonitorInfo Monitor, ToggleSwitch Switch)> _monitorSwitches = new();
         private readonly ToggleSwitch _swBrowserWindowed = new();
         private readonly ToggleSwitch _swKeepBrowserHdr = new();
@@ -73,9 +74,9 @@ namespace SmartHdrManager
         private readonly ToggleSwitch _swKeepDesktopSdr = new();
         private readonly ToggleSwitch _swAlwaysHdr = new();
         private readonly ToggleSwitch _swAlwaysKeepHdr = new();
-        private Label? _alwaysHdrDesc;
+        private SettingText? _alwaysHdrDesc;
         private Label? _backToSdrDesc;
-        private Label? _keepDesktopDesc;
+        private SettingText? _keepDesktopDesc;
         private string? _lastHdrLabel;
 
         private const string BackToSdrText = "The app only switches back HDR that it turned on. HDR you turned on stays on.";
@@ -86,7 +87,7 @@ namespace SmartHdrManager
             : "Needs Windows 11: this Windows does not have the colour-profile functions.";
         private readonly ToggleSwitch _swAutoUpdate = new();
         private ModernButton? _checkUpdatesButton;
-        private Label? _updateDesc;
+        private SettingText? _updateDesc;
         private readonly Stepper _fallback = new() { Minimum = 0, Maximum = 30 };
 
         // Video & RTX HDR
@@ -120,7 +121,7 @@ namespace SmartHdrManager
         private SmoothScrollTable? _appsPage;
         private readonly List<(int Row, int Height, Control Control)> _videoDetailRows = new();
         private int _videoMasterRow;
-        private Label? _scriptStatusLabel, _browserWindowedDesc, _keepBrowserDesc;
+        private SettingText? _scriptStatusLabel, _browserWindowedDesc, _keepBrowserDesc;
         private bool? _lastScriptSeen;
         private bool _reallyExit;
         private int _logCursor;
@@ -154,7 +155,8 @@ namespace SmartHdrManager
             ForeColor = Theme.Text;
             StartPosition = FormStartPosition.CenterScreen;
 
-            var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(20) };
+            // Not docked: OnLayout places it as a centred column
+            var root = new TableLayoutPanel { ColumnCount = 1, RowCount = 3, Padding = new Padding(20) };
             _root = root;
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 104));
@@ -185,6 +187,7 @@ namespace SmartHdrManager
 
             ResumeLayout(false);
             PerformLayout();
+            WindowMemory.Remember(this, _engine, WindowMemory.Main);   // size and position survive restarts (#13)
 
             LayoutStatusCard();
             ShowPage(0);
@@ -435,6 +438,9 @@ namespace SmartHdrManager
             _alwaysHdrDesc = RowDescription(alwaysRow);
             _swAlwaysHdr.Enabled = HdrEngine.AlwaysHdrSupported;
             Add(alwaysRow, 68);
+            _toolTip.SetToolTip(_shadowLift, "Off: the full gamma 2.2 correction. 100 %: dark shades as Windows shows them without the correction.\n" +
+                                             "Only SDR content changes; HDR games and videos are never affected.");
+            Add(SettingRow("Shadow lift", "Brighter dark shades if blacks look crushed on your display.", _shadowLift), 68);
             Add(SettingRow("Keep HDR on when the app exits", "Off: HDR goes back to how it was when the app started.", _swAlwaysKeepHdr), 68);
             var removeAlways = new ModernButton { Text = "Remove", AutoSize = true };
             _toolTip.SetToolTip(removeAlways, "Switches Always-HDR off, puts your calibration profile back and removes every colour profile it created");
@@ -608,6 +614,7 @@ namespace SmartHdrManager
         {
             _swKeepDesktopSdr.Enabled = !alwaysOn;
             _swAlwaysKeepHdr.Enabled = alwaysOn && HdrEngine.AlwaysHdrSupported;
+            _shadowLift.Enabled = alwaysOn && HdrEngine.AlwaysHdrSupported;
             if (_keepDesktopDesc != null) _keepDesktopDesc.Text = alwaysOn ? "Not used with Always-HDR." : KeepDesktopText;
             if (_backToSdrDesc != null)
                 _backToSdrDesc.Text = alwaysOn ? "Always-HDR: when the correction comes back after HDR content." : BackToSdrText;
@@ -620,8 +627,8 @@ namespace SmartHdrManager
             TextAlign = ContentAlignment.TopLeft, Margin = new Padding(2, 0, 0, 6), AutoSize = false
         };
 
-        /// <summary>The description line of a <see cref="SettingRow"/> (its last label).</summary>
-        private static Label RowDescription(RoundedPanel row) => row.Controls.OfType<Label>().Last();
+        /// <summary>The description line of a <see cref="SettingRow"/>.</summary>
+        private static SettingText RowDescription(SettingCard row) => row.Description;
 
         /// <summary>Shows or hides the detail rows of "Videos / RTX Video HDR" (only shown while the main switch is on).</summary>
         private void SetVideoDetailsVisible(bool visible)
@@ -684,42 +691,16 @@ namespace SmartHdrManager
             TextAlign = ContentAlignment.BottomLeft, Margin = new Padding(2, 0, 0, 2), AutoSize = false
         };
 
-        private static RoundedPanel SettingRow(string title, string description, Control control)
+        /// <summary>A settings card: title and description (drawn by the card, see <see cref="SettingCard"/>), control on the right.</summary>
+        private static SettingCard SettingRow(string title, string description, Control control)
         {
             const int w = CardWidth - 8;   // a little narrower: room for the scrollbar
             const int h = 60;
-
-            var row = new RoundedPanel { Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Size = new Size(w, h) };
-
-            int textWidth = w - 18 - control.Width - 34;
-            var titleLabel = new Label { UseMnemonic = false, Text = title, Font = Theme.Semibold, ForeColor = Theme.Text, AutoSize = false, AutoEllipsis = true };
-            titleLabel.SetBounds(18, 10, textWidth, 22);
-
-            var descLabel = new Label { UseMnemonic = false, Text = description, Font = Theme.Small, ForeColor = Theme.Muted, AutoSize = false, AutoEllipsis = true };
-            descLabel.SetBounds(18, 32, textWidth, 20);
-
             control.Location = new Point(w - 18 - control.Width, (h - control.Height) / 2);
-
-            row.Controls.Add(control);
-            row.Controls.Add(titleLabel);
-            row.Controls.Add(descLabel);
-
-            // Explicit layout (DPI-safe): control on the right, text uses the remaining width
-            row.Layout += (_, _) =>   // after DPI scaling, see LayoutStatusCard
+            return new SettingCard(title, description, control)
             {
-                int S(int v) => row.LogicalToDeviceUnits(v);
-                int rw = row.ClientSize.Width;
-                int rh = row.ClientSize.Height;
-                control.Location = new Point(rw - S(18) - control.Width, (rh - control.Height) / 2);
-
-                int textWidth2 = Math.Max(0, control.Left - S(16) - S(18));
-                int titleHeight = titleLabel.PreferredHeight;
-                int descHeight = descLabel.PreferredHeight;
-                int top = Math.Max(0, (rh - titleHeight - descHeight) / 2);
-                titleLabel.SetBounds(S(18), top, textWidth2, titleHeight);
-                descLabel.SetBounds(S(18), top + titleHeight, textWidth2, descHeight);
+                Radius = 10, BackColor = Theme.Surface, Dock = DockStyle.Fill, Margin = new Padding(0, 0, 0, 8), Size = new Size(w, h)
             };
-            return row;
         }
 
         private Control BuildLogPage()
@@ -787,6 +768,7 @@ namespace SmartHdrManager
                 }
             };
             _minimumHdr.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.MinimumHdrSeconds = _minimumHdr.Value); };
+            _shadowLift.ValueChanged += (_, _) => { if (!_loadingSettings) _engine.Update(c => c.AlwaysHdrShadowLift = _shadowLift.Value); };
             _hotkeyChoice.SelectedIndexChanged += (_, _) =>
             {
                 if (_loadingSettings) return;
@@ -898,8 +880,6 @@ namespace SmartHdrManager
                 // Minimize = hide to tray (no taskbar button, not in Alt-Tab)
                 if (WindowState == FormWindowState.Minimized)
                     BeginInvoke(new Action(HideToTray));
-                else
-                    UpdateContentWidth();
             };
 
             FormClosing += (_, e) =>
@@ -912,14 +892,20 @@ namespace SmartHdrManager
             };
         }
 
-        /// <summary>Centres the content in a column of at most <see cref="MaxContentWidth"/> (wide / maximized windows).</summary>
-        private void UpdateContentWidth()
+        /// <summary>
+        /// The content is a centred column of at most <see cref="MaxContentWidth"/> (wide / maximized windows), placed
+        /// here instead of docked with a changing padding: when the window is wider than the column, resizing only moves
+        /// the column, and nothing inside it is laid out again. (The padding version laid out every control twice on
+        /// each step of a resize.)
+        /// </summary>
+        protected override void OnLayout(LayoutEventArgs e)
         {
-            if (_root == null) return;
-            int edge = LogicalToDeviceUnits(20);
-            int side = Math.Max(edge, (ClientSize.Width - LogicalToDeviceUnits(MaxContentWidth)) / 2);
-            var padding = new Padding(side, edge, side, edge);
-            if (_root.Padding != padding) _root.Padding = padding;
+            base.OnLayout(e);
+            if (_root == null || WindowState == FormWindowState.Minimized) return;
+            Size client = ClientSize;
+            int width = Math.Min(client.Width, LogicalToDeviceUnits(MaxContentWidth) + _root.Padding.Horizontal);
+            var bounds = new Rectangle((client.Width - width) / 2, 0, width, client.Height);
+            if (_root.Bounds != bounds) _root.Bounds = bounds;
         }
 
         // ------------------------------------------------------------------
@@ -1151,7 +1137,7 @@ namespace SmartHdrManager
             {
                 Text = "RenoDX Games",
                 StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
+                FormBorderStyle = FormBorderStyle.Sizable, SizeGripStyle = SizeGripStyle.Hide,
                 MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
                 BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
                 Icon = _windowIcon, KeyPreview = true,
@@ -1226,6 +1212,7 @@ namespace SmartHdrManager
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
             dlg.ClientSize = new Size(560, Math.Clamp(200 + conflicts.Count * 50, 300, 500));
             dlg.ResumeLayout(false);
+            WindowMemory.Remember(dlg, _engine, WindowMemory.RenoDxConflicts, new Size(560, 300));
             list.SetItems(conflicts.Select(r => new GameItem(r)).ToArray(), null);
             UpdateCount();
             return (dlg, list);
@@ -1312,7 +1299,7 @@ namespace SmartHdrManager
             {
                 Text = "Never HDR games",
                 StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
+                FormBorderStyle = FormBorderStyle.Sizable, SizeGripStyle = SizeGripStyle.Hide,
                 MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
                 BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
                 Icon = _windowIcon, KeyPreview = true,
@@ -1418,6 +1405,7 @@ namespace SmartHdrManager
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
             dlg.ClientSize = new Size(560, 500);
             dlg.ResumeLayout(false);
+            WindowMemory.Remember(dlg, _engine, WindowMemory.NeverHdr, new Size(520, 360));
             ShowItems(items);
             dlg.ShowDialog(this);
 
@@ -1463,7 +1451,7 @@ namespace SmartHdrManager
             {
                 Text = $"Game options – {item.Name}",
                 StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
+                FormBorderStyle = FormBorderStyle.Sizable, SizeGripStyle = SizeGripStyle.Hide,
                 MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
                 BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
                 Icon = _windowIcon, KeyPreview = true,
@@ -1533,7 +1521,7 @@ namespace SmartHdrManager
                 Enabled = !item.Excluded && processes.Count > 0   // a "Never HDR" row: restore it first
             };
             var exesRow = SettingRow("Programs this game runs as", ExesSummary(item, library), changeExes);
-            var exesDesc = (Label)exesRow.Controls[2];   // SettingRow: control, title, description
+            var exesDesc = exesRow.Description;
             _toolTip.SetToolTip(changeExes, library
                 ? "If the game is watched by the wrong exe: add the right one, remove the wrong one"
                 : "Pick the program's exe again, e.g. after it was renamed or moved");
@@ -1578,7 +1566,12 @@ namespace SmartHdrManager
                 TextAlign = ContentAlignment.TopLeft, Margin = new Padding(18, 4, 18, 0)
             }, 0, 7);
 
-            var buttons = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 8, 0, 0) };
+            // At the bottom however tall the window is dragged
+            var buttons = new FlowLayoutPanel
+            {
+                Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Bottom, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.RightToLeft, WrapContents = false, Margin = new Padding(0, 8, 0, 0)
+            };
             var save = new ModernButton { Text = "Save", Primary = true, AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
             var cancel = new ModernButton { Text = "Cancel", AutoSize = true, Margin = new Padding(8, 0, 0, 0) };
             var reset = new ModernButton { Text = "Reset", AutoSize = true, Margin = new Padding(0) };
@@ -1595,6 +1588,7 @@ namespace SmartHdrManager
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
             dlg.ClientSize = new Size(620, 504 + hintHeight);
             dlg.ResumeLayout(false);
+            WindowMemory.Remember(dlg, _engine, WindowMemory.GameOptions);   // never smaller than this
 
             if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
@@ -1667,7 +1661,7 @@ namespace SmartHdrManager
             {
                 Text = $"Programs – {gameName}",
                 StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog,
+                FormBorderStyle = FormBorderStyle.Sizable, SizeGripStyle = SizeGripStyle.Hide,   // long paths: drag it wider (#14)
                 MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
                 BackColor = Theme.Back, ForeColor = Theme.Text, Font = Theme.Body,
                 Icon = _windowIcon, KeyPreview = true,
@@ -1799,8 +1793,9 @@ namespace SmartHdrManager
             dlg.Controls.Add(table);
             dlg.AutoScaleDimensions = new SizeF(96F, 96F);
             dlg.AutoScaleMode = AutoScaleMode.Dpi;
-            dlg.ClientSize = new Size(660, 500);
+            dlg.ClientSize = new Size(780, 520);
             dlg.ResumeLayout(false);
+            WindowMemory.Remember(dlg, _engine, WindowMemory.GamePrograms, new Size(600, 420));
             ShowEntries();
 
             if (dlg.ShowDialog(owner) != DialogResult.OK) return false;
@@ -1883,6 +1878,9 @@ namespace SmartHdrManager
             FillAppsPage();
             return page;
         }
+
+        // Apps › Creative apps › Stay in SDR after you switch away: seconds, -1 = until the app closes
+        private static readonly int[] CreativeHoldStops = { 3, 10, 30, 60, 120, 300, -1 };
 
         private void FillAppsPage()
         {
@@ -2067,6 +2065,29 @@ namespace SmartHdrManager
             var addCreative = new ModernButton { Glyph = Theme.GlyphAdd, Text = "Add app", AutoSize = true };
             addCreative.Click += (_, _) => OnAddApp(AppCategories.Creative, "Select the app that needs SDR (.exe)");
             Add(Actions(addCreative), 52);
+
+            // How long SDR stays after a creative app leaves the front (index into CreativeHoldStops; last = until it closes)
+            int holdSeconds = _engine.Read(c => c.CreativeSdrHoldSeconds);
+            int holdIndex = holdSeconds < 0 ? CreativeHoldStops.Length - 1
+                : Math.Max(0, Array.FindLastIndex(CreativeHoldStops, v => v >= 0 && v <= holdSeconds));
+            var hold = new Stepper
+            {
+                Minimum = 0, Maximum = CreativeHoldStops.Length - 1, Step = 1, Size = new Size(S(196), S(34)), BackColor = Theme.Surface,
+                Format = i => CreativeHoldStops[i] < 0 ? "Until it closes" : CreativeHoldStops[i] < 60 ? $"{CreativeHoldStops[i]} s" : $"{CreativeHoldStops[i] / 60} min",
+                Margin = new Padding(0)
+            };
+            hold.Value = holdIndex;
+            hold.ValueChanged += (_, _) =>
+            {
+                int seconds = CreativeHoldStops[hold.Value];
+                _engine.Update(c => c.CreativeSdrHoldSeconds = seconds);
+                _engine.Log("CONFIG", seconds < 0
+                    ? "Creative apps: SDR stays until the app closes after it leaves the front."
+                    : $"Creative apps: SDR stays {seconds} s after the app leaves the front.");
+            };
+            _toolTip.SetToolTip(hold, "How long SDR stays after you switch away from a creative app – no black screens while you alt-tab.\n" +
+                                      "HDR games and videos you switch to still get HDR at once.");
+            Add(SettingRow("Stay in SDR after you switch away", "No black screens while you alt-tab. HDR games and videos still switch at once.", hold), 68);
 
             // ---- Recording & streaming ----
             Add(SectionHeader("Recording & streaming"), 46);
@@ -2323,7 +2344,7 @@ namespace SmartHdrManager
             using var dlg = new Form
             {
                 Text = "Add a running program", StartPosition = FormStartPosition.CenterParent,
-                FormBorderStyle = FormBorderStyle.FixedDialog, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
+                FormBorderStyle = FormBorderStyle.Sizable, SizeGripStyle = SizeGripStyle.Hide, MinimizeBox = false, MaximizeBox = false, ShowInTaskbar = false,
                 Padding = new Padding(12)
             };
             dlg.SuspendLayout();
@@ -2349,6 +2370,7 @@ namespace SmartHdrManager
             dlg.CancelButton = cancel;
             dlg.Icon = _windowIcon;
             Theme.ApplyForm(dlg);
+            WindowMemory.Remember(dlg, _engine, WindowMemory.AddRunning, new Size(420, 300));
 
             if (dlg.ShowDialog(this) != DialogResult.OK || list.SelectedIndex < 0) return null;
             return (rows[list.SelectedIndex].Name, rows[list.SelectedIndex].Path);
@@ -2387,6 +2409,7 @@ namespace SmartHdrManager
                 _swKeepDesktopSdr.Checked = _engine.Read(c => c.KeepDesktopSdr);
                 _swAlwaysHdr.Checked = HdrEngine.AlwaysHdrSupported && _engine.Read(c => c.AlwaysHdrMode);
                 _swAlwaysKeepHdr.Checked = _engine.Read(c => c.AlwaysHdrKeepHdrOnExit);
+                _shadowLift.Value = _engine.Read(c => c.AlwaysHdrShadowLift);
                 UpdateAlwaysHdrSettings(_swAlwaysHdr.Checked);
                 _swAutoUpdate.Checked = _engine.Read(c => c.CheckForUpdatesAutomatically);
 

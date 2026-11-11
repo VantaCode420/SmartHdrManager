@@ -1,5 +1,20 @@
 # Changelog
 
+## 3.0.1 – 2026-11
+
+Thanks to [la773](https://github.com/la773) for the feature requests [#13](https://github.com/VantaCode420/SmartHdrManager/issues/13) and [#14](https://github.com/VantaCode420/SmartHdrManager/issues/14).
+
+### New
+- **Windows remember their size and position** ([#13](https://github.com/VantaCode420/SmartHdrManager/issues/13)). The main window and every dialog – *Options*, *Programs this game runs as*, *Never HDR games*, the RenoDX list, *Add running* and the update window – open where you left them and at the size you gave them, also after the app restarts. A maximized main window comes back maximized. If the saved place is no longer on a screen (a monitor was disconnected, the resolution changed), the window keeps its size and opens in the middle of the main screen; a window bigger than the screen is made to fit. Stored in `config.json` (`WindowPlacements`); *Reset to defaults* keeps it.
+- **Always-HDR: Shadow lift.** *Settings › Always-HDR › Shadow lift*, right below the Always-HDR switch, for displays where gamma 2.2 makes the darkest shades look crushed. It blends the shadows of the correction back towards Windows' own sRGB decode, in 5 % steps: *Off* (the default) is the full gamma 2.2 correction as before, 100 % shows dark shades as without the correction. Midtones and white change by at most about 2 %, HDR content is never affected. Each level gets its own validated profile (`…_g22_L20.icm`), made a moment after you stop clicking; the change is logged (`COLOR`). Greyed out while Always-HDR is off.
+- **Creative apps: Stay in SDR after you switch away.** *Apps › Creative apps* has a new setting for how long SDR stays after a creative app leaves the front: 3 s (as before), 10 s, 30 s, 1 min, 2 min, 5 min or *Until it closes*. No more black screens back and forth while you alt-tab between Photoshop, Explorer and the browser. It only delays the HDR that would come back by itself – the HDR desktop you had on, or Always-HDR's HDR; an HDR game or video you switch to still gets HDR at once. With *Until it closes*, an app counts as closed once its last window is gone – Photoshop can leave hidden processes behind after you close it. The log says how long SDR stays (`HDR`).
+- **Resizable dialogs, readable paths** ([#14](https://github.com/VantaCode420/SmartHdrManager/issues/14)). All dialogs can now be resized, and their content follows: lists and release notes grow, buttons stay at the bottom. *Programs this game runs as* opens wider, and hovering over an exe shows its full path. A dialog can't be made smaller than its content needs.
+
+### Fixed
+- **Smoother resizing of the main window.** Resizing was choppy, especially on high-resolution screens. A window wider than the content column now only moves the column instead of laying out every control twice per step (about 10× faster), the settings and Apps rows draw their own text instead of moving two text windows each, rounded cards only smooth their edges, and the Games list draws its rows directly while the width changes. Everything looks exactly as before.
+- **Win+Alt+H while a recording app runs** no longer flashes HDR on and off again (two black screens): the game is added, and HDR stays off while the recording app set to *No HDR* runs – the same while SDR is forced from the tray.
+- The update window no longer opens with all release notes selected.
+
 ## 3.0.0 – 2026-11
 
 ### New

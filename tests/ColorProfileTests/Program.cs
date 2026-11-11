@@ -22,6 +22,7 @@ internal static class Tests
     {
         TransferFunctionTests();
         CurveTests();
+        ShadowLiftTests();
         CalibrationMergeTests();
         ValidatorTests();
         FileFormatTests();
@@ -99,6 +100,61 @@ internal static class Tests
         Check(new[] { 200.5, 201, 300, 1000, 4000, 10000 }.All(n => GammaCorrection.CorrectNits(n, 200, 2.2) == n), "above SDR white is unchanged");
         Near(GammaCorrection.CorrectNits(199.999999, 200, 2.2), 200, 1e-4, "no jump just below SDR white");
         Near(GammaCorrection.CorrectNits(0, 200, 2.2), 0, 0, "black stays black");
+    }
+
+    // Settings › Always-HDR › Shadow lift: blends the corrected shadows back towards Windows' sRGB decode
+    private static void ShadowLiftTests()
+    {
+        Check(GammaCorrection.BuildLut(Identity, 200, 2.2, 4096, 0).SequenceEqual(GammaCorrection.BuildLut(Identity, 200, 2.2, 4096)),
+              "lift 0 is exactly the plain correction (profiles from 3.0.0 stay valid)");
+        Check(Enumerable.Range(0, 2001).All(i =>
+        {
+            double nits = 200 * i / 2000.0;
+            return Math.Abs(GammaCorrection.CorrectNits(nits, 200, 2.2, 1) - nits) <= 1e-9;
+        }), "lift 100 % is no correction at all (Windows' sRGB decode)");
+        // From the known lift-0 value (worked out separately): 0.4255 + 0.5 x (1 - 0.4255)
+        Near(GammaCorrection.CorrectNits(1, 200, 2.2, 0.5), 0.71274501459584783, 1e-9, "lift 50 % at W=200, 1 nit");
+        Check(new[] { 200.0, 300, 1000 }.All(n => GammaCorrection.CorrectNits(n, 200, 2.2, 0.4) == n), "lift: SDR white and above unchanged");
+        Near(GammaCorrection.CorrectNits(0, 200, 2.2, 0.7), 0, 0, "lift: black stays black");
+
+        bool rising = true, lifted = true, midtones = true;
+        foreach (double white in new[] { 80.0, 200, 480 })
+            for (int l = 0; l <= 20; l++)
+            {
+                double lift = l / 20.0;
+                double last = -1;
+                for (int i = 0; i <= 4000; i++)
+                {
+                    double nits = white * i / 4000.0;
+                    double v = GammaCorrection.CorrectNits(nits, white, 2.2, lift);
+                    if (v <= last && i > 0) rising = false;
+                    last = v;
+                }
+                // Deep shadows (below 1 % of white) get brighter; from 15 % of white up nothing moves more than 2.5 %
+                for (int i = 1; i <= 100; i++)
+                {
+                    double nits = white * 0.01 * i / 100.0;
+                    if (lift > 0 && GammaCorrection.CorrectNits(nits, white, 2.2, lift) <= GammaCorrection.CorrectNits(nits, white, 2.2)) lifted = false;
+                }
+                for (int i = 15; i <= 100; i++)
+                {
+                    double nits = white * i / 100.0;
+                    double ratio = GammaCorrection.CorrectNits(nits, white, 2.2, lift) / GammaCorrection.CorrectNits(nits, white, 2.2);
+                    if (Math.Abs(ratio - 1) > 0.025) midtones = false;
+                }
+            }
+        Check(rising, "lift: the curve always rises (every lift 0–100 %, W 80/200/480)");
+        Check(lifted, "lift: the deep shadows get brighter");
+        Check(midtones, "lift: from 15 % of white up, at most 2.5 % change");
+
+        bool valid = true;
+        foreach (double white in new[] { 80.0, 200, 480 })
+            for (int l = 5; l <= 100; l += 5)
+            {
+                try { CorrectedProfile.FromIdentity(0.0005, 1000, white, 2.2, "SHM test", l / 100.0); }
+                catch (Exception ex) { valid = false; Console.WriteLine($"      W={white} lift={l}: {ex.Message}"); }
+            }
+        Check(valid, "lift: every profile 5–100 % passes validation (W 80/200/480)");
     }
 
     private static void CalibrationMergeTests()
@@ -212,5 +268,21 @@ internal static class Tests
         }
         Console.WriteLine($"INFO  largest interpolation error {worst:0.00000000} (limit {LutValidator.MaxErrorPq:0.00000000})");
         Check(worst < LutValidator.MaxErrorPq / 4, "real profile: far inside the error limit");
+
+        bool liftValid = true;
+        foreach (int l in new[] { 5, 25, 50, 100 })
+        {
+            try
+            {
+                var lifted = IccProfile.Parse(CorrectedProfile.FromCalibration(original, 240, 2.2, "SHM test", l / 100.0));
+                var liftTag = Mhc2Tag.Parse(lifted.Find("MHC2")!.Data);
+                if (!liftTag.Matrix.SequenceEqual(baseTag.Matrix) ||
+                    !before.Tags.Where(t => t.Signature is not ("MHC2" or "desc")).All(t => t.Data.SequenceEqual(lifted.Find(t.Signature)!.Data)))
+                    liftValid = false;
+            }
+            catch (Exception ex) { liftValid = false; Console.WriteLine($"      lift {l}: {ex.Message}"); }
+        }
+        Check(liftValid, "real profile: shadow lift 5/25/50/100 % passes validation, other tags unchanged");
+        Check(original.SequenceEqual(File.ReadAllBytes(real)), "real profile: still untouched");
     }
 }

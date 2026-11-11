@@ -45,18 +45,183 @@ namespace SmartHdrManager
         protected override void OnPaintBackground(PaintEventArgs e)
         {
             var g = e.Graphics;
+            using var brush = new SolidBrush(BackColor);
+
+            // The inside is one plain colour: filled without anti-aliasing (fast). Only a strip along the edges – the
+            // rounded corners and the border – is drawn anti-aliased; that used to cover the whole card, which made
+            // resizing the window slow on large high-DPI cards. Same pixels as before.
+            int edge = (int)Math.Ceiling(ScaledRadius) + 2;
+            var inner = Rectangle.FromLTRB(edge, edge, Width - edge, Height - edge);
+            bool hasInner = inner.Width > 0 && inner.Height > 0;
+            if (hasInner) g.FillRectangle(brush, inner);
+
+            var state = g.Save();
+            if (hasInner) g.ExcludeClip(inner);
             g.Clear(Parent?.BackColor ?? Theme.Back);
             g.SmoothingMode = SmoothingMode.AntiAlias;
-
             using var path = Theme.RoundRect(new RectangleF(0.5f, 0.5f, Width - 1.5f, Height - 1.5f), ScaledRadius);
-            using (var brush = new SolidBrush(BackColor))
-                g.FillPath(brush, path);
-
+            g.FillPath(brush, path);
             if (!_borderColor.IsEmpty)
             {
                 using var pen = new Pen(_borderColor);
                 g.DrawPath(pen, path);
             }
+            g.Restore(state);
+            g.SmoothingMode = SmoothingMode.AntiAlias;   // as before, for anything drawn after the background
+        }
+    }
+
+    /// <summary>A line of text drawn by a <see cref="SettingCard"/> – set like a label's Text / ForeColor.</summary>
+    public sealed class SettingText
+    {
+        private readonly Control _owner;
+        private string _text;
+        private Color _color;
+
+        internal SettingText(Control owner, string text, Color color)
+        {
+            _owner = owner;
+            _text = text;
+            _color = color;
+        }
+
+        public string Text
+        {
+            get => _text;
+            set { if (_text == (value ?? string.Empty)) return; _text = value ?? string.Empty; _owner.Invalidate(); }
+        }
+
+        public Color ForeColor
+        {
+            get => _color;
+            set { if (_color == value) return; _color = value; _owner.Invalidate(); }
+        }
+
+        public bool IsDisposed => _owner.IsDisposed;
+    }
+
+    /// <summary>
+    /// A settings row: title and description on the left, one control on the right. The two text lines are drawn by
+    /// the card itself instead of being two Label windows – with dozens of rows, moving those windows on every step made
+    /// resizing the window slow. Text that doesn't fit ends in "…" and shows in full as a tooltip, like a label.
+    /// </summary>
+    public sealed class SettingCard : RoundedPanel
+    {
+        // A label's flags (TopLeft, AutoEllipsis, no mnemonics): looks exactly like the labels it replaces
+        private const TextFormatFlags TextFlags = TextFormatFlags.Top | TextFormatFlags.Left | TextFormatFlags.WordBreak |
+                                                  TextFormatFlags.TextBoxControl | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix;
+        private static readonly ToolTip FullText = new() { InitialDelay = 500, ReshowDelay = 100, AutoPopDelay = 20000 };
+
+        private readonly Control _control;
+        private Font? _titleFont;          // Semibold at the scale of this card's Font (Theme.Small, DPI-scaled by WinForms)
+        private Rectangle _titleRect, _descRect;
+        private int _titleHeight, _descHeight;   // one line of each font (measured once per font)
+        private string? _tip;
+
+        public SettingText Title { get; }
+        public SettingText Description { get; }
+
+        public SettingCard(string title, string description, Control control)
+        {
+            Title = new SettingText(this, title, Theme.Text);
+            Description = new SettingText(this, description, Theme.Muted);
+            _control = control;
+            Controls.Add(control);
+            Font = Theme.Small;
+        }
+
+        private Font TitleFont
+        {
+            get
+            {
+                if (_titleFont != null) return _titleFont;
+                float scale = Font.SizeInPoints / Theme.Small.SizeInPoints;
+                _titleFont = Math.Abs(scale - 1f) < 0.001f
+                    ? Theme.Semibold
+                    : new Font(Theme.Semibold.FontFamily, Theme.Semibold.SizeInPoints * scale, Theme.Semibold.Style, GraphicsUnit.Point);
+                return _titleFont;
+            }
+        }
+
+        protected override void OnFontChanged(EventArgs e)
+        {
+            DropTitleFont();
+            base.OnFontChanged(e);
+            PerformLayout();
+            Invalidate();
+        }
+
+        private void DropTitleFont()
+        {
+            if (_titleFont != null && !ReferenceEquals(_titleFont, Theme.Semibold)) _titleFont.Dispose();
+            _titleFont = null;
+            _titleHeight = _descHeight = 0;
+        }
+
+        private static int LineHeight(Font font) =>
+            TextRenderer.MeasureText("Ag", font, new Size(int.MaxValue, int.MaxValue), TextFlags).Height;
+
+        // Explicit layout (DPI-safe): control on the right, the text uses the remaining width
+        protected override void OnLayout(LayoutEventArgs e)
+        {
+            base.OnLayout(e);
+            if (_control == null) return;   // the base constructor can already lay out
+            int S(int v) => LogicalToDeviceUnits(v);
+            int w = ClientSize.Width, h = ClientSize.Height;
+            _control.Location = new Point(w - S(18) - _control.Width, (h - _control.Height) / 2);
+
+            int textWidth = Math.Max(0, _control.Left - S(16) - S(18));
+            if (_titleHeight == 0) { _titleHeight = LineHeight(TitleFont); _descHeight = LineHeight(Font); }
+            int titleHeight = _titleHeight, descHeight = _descHeight;
+            int top = Math.Max(0, (h - titleHeight - descHeight) / 2);
+            var title = new Rectangle(S(18), top, textWidth, titleHeight);
+            var desc = new Rectangle(S(18), top + titleHeight, textWidth, descHeight);
+            if (title == _titleRect && desc == _descRect) return;
+            _titleRect = title;
+            _descRect = desc;
+            Invalidate();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            var g = e.Graphics;
+            if (_titleRect.Width > 0)
+                TextRenderer.DrawText(g, Title.Text, TitleFont, _titleRect, Title.ForeColor, TextFlags);
+            if (_descRect.Width > 0)
+                TextRenderer.DrawText(g, Description.Text, Font, _descRect, Description.ForeColor, TextFlags);
+        }
+
+        private static bool Cut(string text, Font font, Rectangle rect) =>
+            text.Length > 0 && TextRenderer.MeasureText(text, font, new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine).Width > rect.Width;
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            string? tip = _titleRect.Contains(e.Location) && Cut(Title.Text, TitleFont, _titleRect) ? Title.Text
+                        : _descRect.Contains(e.Location) && Cut(Description.Text, Font, _descRect) ? Description.Text
+                        : null;
+            if (tip == _tip) return;
+            _tip = tip;
+            FullText.SetToolTip(this, tip);
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_tip == null) return;
+            _tip = null;
+            FullText.SetToolTip(this, null);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                FullText.SetToolTip(this, null);
+                DropTitleFont();
+            }
+            base.Dispose(disposing);
         }
     }
 
@@ -858,6 +1023,7 @@ namespace SmartHdrManager
         private int _selected = -1, _hover = -1, _offset;
         private readonly Dictionary<string, Bitmap?> _icons = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _iconsLoading = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ToolTip _pathTip = new() { InitialDelay = 400, ReshowDelay = 100, AutoPopDelay = 20000 };   // the full path (#14)
 
         public event EventHandler? SelectionChanged;
 
@@ -920,13 +1086,17 @@ namespace SmartHdrManager
         {
             base.OnMouseMove(e);
             int h = IndexAt(e.Location);
-            if (h != _hover) { _hover = h; Invalidate(); }
+            if (h == _hover) return;
+            _hover = h;
+            Invalidate();
+            _pathTip.SetToolTip(this, h >= 0 ? _items[h].Path ?? string.Empty : string.Empty);
         }
 
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
             if (_hover != -1) { _hover = -1; Invalidate(); }
+            _pathTip.SetToolTip(this, string.Empty);
         }
 
         protected override void OnMouseDown(MouseEventArgs e)
@@ -1077,6 +1247,7 @@ namespace SmartHdrManager
             {
                 foreach (var bmp in _icons.Values) bmp?.Dispose();
                 _icons.Clear();
+                _pathTip.Dispose();
             }
             base.Dispose(disposing);
         }
@@ -1220,6 +1391,13 @@ namespace SmartHdrManager
         }
         private readonly Dictionary<GameItem, RowCache> _rowCache = new();
 
+        // While the window is being resized the row width changes on every frame: the rows are drawn straight into the
+        // paint buffer then (building a new bitmap per row and frame made resizing slow), and cached again once the width
+        // has stayed the same for a moment.
+        private readonly System.Windows.Forms.Timer _resizeSettle = new() { Interval = 250 };
+        private bool _resizing;
+        private int _lastWidth;
+
         // frame statistics of the current scroll animation
         private int _statFrames;
         private double _statPaintMs;
@@ -1235,6 +1413,12 @@ namespace SmartHdrManager
             ForeColor = Theme.Text;
             Font = Theme.Body;
             _animation = new FrameLoop(this, AnimateScroll);
+            _resizeSettle.Tick += (_, _) =>
+            {
+                _resizeSettle.Stop();
+                _resizing = false;
+                Invalidate();   // cached again at the final width
+            };
         }
 
         // ------------------------------------------------------------------
@@ -1533,6 +1717,14 @@ namespace SmartHdrManager
             base.OnResize(e);
             _target = Math.Clamp(_target, 0, MaxOffset);
             _offset = Math.Clamp(_offset, 0, MaxOffset);
+            int width = ClientSize.Width;
+            if (width != _lastWidth && _lastWidth > 0 && IsHandleCreated && Visible)
+            {
+                _resizing = true;
+                _resizeSettle.Stop();
+                _resizeSettle.Start();
+            }
+            _lastWidth = width;
             Invalidate();
         }
 
@@ -1559,20 +1751,28 @@ namespace SmartHdrManager
             int first = Math.Max(0, (int)((_offset - Gap) / RowHeight));
             int last = Math.Min(_items.Count - 1, (int)((_offset + ClientSize.Height) / RowHeight) + 1);
 
-            g.CompositingMode = CompositingMode.SourceCopy;          // rows are opaque: plain copy, fastest path
-            g.InterpolationMode = InterpolationMode.NearestNeighbor;
-            g.PixelOffsetMode = PixelOffsetMode.Half;
-            for (int i = first; i <= last; i++)
+            if (_resizing)
             {
-                Rectangle row = RowRect(i);
-                var cache = GetRowBitmap(i, row.Width, row.Height);
-                if (cache != null)
-                    g.DrawImage(cache.Bitmap, new Rectangle(row.X, row.Y, cache.Width, cache.Height),
-                        0, 0, cache.Width, cache.Height, GraphicsUnit.Pixel);
+                for (int i = first; i <= last; i++) DrawRow(g, i, RowRect(i));
+                g.InterpolationMode = InterpolationMode.Default;
             }
-            g.CompositingMode = CompositingMode.SourceOver;
-            g.PixelOffsetMode = PixelOffsetMode.Default;
-            TrimRowCache(first, last);
+            else
+            {
+                g.CompositingMode = CompositingMode.SourceCopy;          // rows are opaque: plain copy, fastest path
+                g.InterpolationMode = InterpolationMode.NearestNeighbor;
+                g.PixelOffsetMode = PixelOffsetMode.Half;
+                for (int i = first; i <= last; i++)
+                {
+                    Rectangle row = RowRect(i);
+                    var cache = GetRowBitmap(i, row.Width, row.Height);
+                    if (cache != null)
+                        g.DrawImage(cache.Bitmap, new Rectangle(row.X, row.Y, cache.Width, cache.Height),
+                            0, 0, cache.Width, cache.Height, GraphicsUnit.Pixel);
+                }
+                g.CompositingMode = CompositingMode.SourceOver;
+                g.PixelOffsetMode = PixelOffsetMode.Default;
+                TrimRowCache(first, last);
+            }
 
             if (ScrollbarVisible)
             {
@@ -1776,6 +1976,7 @@ namespace SmartHdrManager
             if (disposing)
             {
                 _animation.Dispose();
+                _resizeSettle.Dispose();
                 ClearRowCache();
                 foreach (var bmp in _icons.Values) bmp?.Dispose();
                 _icons.Clear();

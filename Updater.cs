@@ -369,7 +369,8 @@ namespace SmartHdrManager
 
             Text = "Update available";
             StartPosition = FormStartPosition.CenterScreen;
-            FormBorderStyle = FormBorderStyle.FixedDialog;
+            FormBorderStyle = FormBorderStyle.Sizable;   // long release notes: drag it bigger
+            SizeGripStyle = SizeGripStyle.Hide;
             MinimizeBox = false;
             MaximizeBox = false;
             ShowInTaskbar = true;
@@ -408,6 +409,7 @@ namespace SmartHdrManager
                 Text = info.Notes.Length > 0 ? info.Notes : "No release notes."
             };
             Theme.UseDarkScrollbars(notes);
+            Shown += (_, _) => notes.Select(0, 0);   // focused first: the text box would show all notes selected
             notesCard.Controls.Add(notes);
             table.Controls.Add(notesCard, 0, 2);
 
@@ -428,6 +430,7 @@ namespace SmartHdrManager
             AutoScaleMode = AutoScaleMode.Dpi;
             ClientSize = new Size(600, 480);
             ResumeLayout(false);
+            WindowMemory.Remember(this, engine, WindowMemory.Update, new Size(520, 380));
 
             _update.Click += async (_, _) => await UpdateNowAsync();
             _page.Click += (_, _) => Updater.OpenReleasePage(_info.PageUrl);

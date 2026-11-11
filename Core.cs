@@ -188,10 +188,20 @@ namespace SmartHdrManager
         public bool AlwaysHdrMode { get; set; } = false;
         // When the app exits: keep HDR on (true) or go back to how it was when the app started (false)
         public bool AlwaysHdrKeepHdrOnExit { get; set; } = false;
+        // Shadow lift of the SDR correction, 0–100 %: blends the shadows back towards Windows' sRGB decode for people who
+        // find gamma 2.2 too dark on their display (0 = the full gamma 2.2 correction, 100 = shadows as without it)
+        public int AlwaysHdrShadowLift { get; set; } = 0;
 
         // Games tab › Options › Programs: exes you added or removed for a library game (by library id). Applied after every
         // scan, so a rescan never brings back an exe you removed or loses one you added.
         public Dictionary<string, GameExeOverride> GameExeOverrides { get; set; } = new();
+
+        // Apps › Creative apps: how long SDR stays after a creative app leaves the front, in seconds (3 = as before 3.0.1);
+        // -1 = until the app closes. HDR games and videos you switch to still get HDR at once.
+        public int CreativeSdrHoldSeconds { get; set; } = 3;
+
+        // Size and position of the main window and the dialogs (by window key), restored at the next start
+        public Dictionary<string, WindowPlacement> WindowPlacements { get; set; } = new();
     }
 
     public sealed class GameExeOverride

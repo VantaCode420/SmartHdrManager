@@ -134,6 +134,9 @@ namespace SmartHdrManager
             public readonly HashSet<string> HdrOnlyApps;    // browsers / players set to "only HDR videos"
             public readonly bool KeepDesktopSdr;            // 2.5 behaviour: also switch back HDR the app did not turn on
             public readonly bool AlwaysHdr;                 // Always-HDR mode on (and possible on this Windows)
+            public readonly int ShadowLift;                 // Always-HDR: shadow lift of the SDR correction, 0–100 %
+            public readonly long CreativeHoldMs;            // SDR stays this long after a creative app leaves the front
+            public readonly bool CreativeUntilClosed;       // … or until that app closes
             // HDR library games whose exe location is known: process name -> the game's install folder(s) and exe(s). A
             // process with the same name that runs from somewhere else is another program (e.g. two unrelated "game.exe").
             public readonly Dictionary<string, (string[] Folders, string[] Exes)> GameFolders;
@@ -190,6 +193,9 @@ namespace SmartHdrManager
                 }
                 KeepDesktopSdr = c.KeepDesktopSdr;
                 AlwaysHdr = c.AlwaysHdrMode && AlwaysHdrSupported;
+                ShadowLift = Math.Clamp(c.AlwaysHdrShadowLift, 0, 100);
+                CreativeUntilClosed = c.CreativeSdrHoldSeconds < 0;
+                CreativeHoldMs = Math.Max(RestoreAfterMs, (long)Math.Max(0, c.CreativeSdrHoldSeconds) * 1000L);
 
                 VideoKeywords = (c.HdrVideoKeywords ?? new List<string>()).Where(k => !string.IsNullOrWhiteSpace(k)).ToArray();
                 BrowserToken = string.IsNullOrWhiteSpace(c.BrowserRealHdrToken) ? string.Empty : c.BrowserRealHdrToken;
@@ -383,6 +389,21 @@ namespace SmartHdrManager
         private readonly object _monitorSignatureLock = new();
         private long _forceSdrSeenMs = long.MinValue / 2;   // an SDR app was last in front (HDR comes back 3 s later)
         private const int RestoreAfterMs = 3000;            // no flip-flop while e.g. a splash screen hands over to the app
+        private string? _lastCreativeApp;                   // the creative app that was last in front (until it closes)
+        private bool _creativeInFront;
+
+        /// <summary>
+        /// SDR is still held for the creative app that was last in front (Apps › Creative apps › Stay in SDR after you
+        /// switch away): only HDR that would come back by itself waits – your own HDR in Classic mode, Always-HDR's HDR.
+        /// HDR games and videos you switch to get HDR at once. Always at least 3 s (no flip-flop on splash screens).
+        /// </summary>
+        private bool CreativeSdrHeld(Snapshot s, long now)
+        {
+            long since = now - _forceSdrSeenMs;
+            if (since < RestoreAfterMs) return true;
+            if (s.CreativeUntilClosed) return _lastCreativeApp != null;   // cleared by the process scan once it has closed
+            return since < s.CreativeHoldMs;
+        }
         private bool _restoreHdr;                   // HDR that was not ours was switched off for an SDR / recording app
         private string _restoreFor = string.Empty;  // ... for this program: HDR comes back on once it is gone
         private bool _externalEnded;                // the full-screen game that switched HDR on itself has closed
@@ -504,7 +525,8 @@ namespace SmartHdrManager
                     AppRules = c.AppRules,                     // the Apps tab (like the games: your list, not a setting)
                     QuickExitCounts = c.QuickExitCounts,
                     LastUpdateCheckUtc = c.LastUpdateCheckUtc,
-                    LastNotifiedVersion = c.LastNotifiedVersion
+                    LastNotifiedVersion = c.LastNotifiedVersion,
+                    WindowPlacements = c.WindowPlacements      // where you put the windows, not a setting
                 };
                 Normalize(fresh);
                 foreach (var prop in typeof(AppConfig).GetProperties())
@@ -1319,8 +1341,14 @@ namespace SmartHdrManager
 
             if (now >= _nextProcessScanMs)
             {
-                _runningGame = FindRunningHdrGame(s, out string? runningPath, out _runningVideoBlocker, out _runningAllBlocker);
+                _runningGame = FindRunningHdrGame(s, out string? runningPath, out _runningVideoBlocker, out _runningAllBlocker,
+                                                  s.CreativeUntilClosed ? _lastCreativeApp : null, out bool creativeRunning);
                 _nextProcessScanMs = now + ProcessScanIntervalMs;
+                if (_lastCreativeApp != null && s.CreativeUntilClosed && !creativeRunning)
+                {
+                    if (_restoreHdr || _alwaysRealSdr) Log("HDR", $"'{_lastCreativeApp}' closed (no window open any more) – SDR no longer held for it.");
+                    _lastCreativeApp = null;
+                }
                 if (_runningGame != null && runningPath != null) RememberProgramPath(_runningGame, runningPath);
                 TrackLauncherFollow(s, now);
             }
@@ -1577,7 +1605,21 @@ namespace SmartHdrManager
 
             bool shouldEnableHdr = EvaluateHdrRequirement(s, procName, title, isFullscreen, _foregroundElsewhere, out string reason);
             bool isForceSdr = s.ForceSdr.Contains(procName);
-            if (isForceSdr) _forceSdrSeenMs = now;
+            if (isForceSdr)
+            {
+                _forceSdrSeenMs = now;
+                _lastCreativeApp = procName;
+                _creativeInFront = true;
+            }
+            else if (_creativeInFront)
+            {
+                // Switched away from a creative app: say how long SDR stays, when that is longer than the usual 3 s
+                _creativeInFront = false;
+                if ((_restoreHdr || _alwaysRealSdr) && (s.CreativeUntilClosed || s.CreativeHoldMs > RestoreAfterMs))
+                    Log("HDR", s.CreativeUntilClosed
+                        ? $"'{_lastCreativeApp}' is no longer in front – SDR stays until it closes (Apps › Creative apps)."
+                        : $"'{_lastCreativeApp}' is no longer in front – SDR stays {s.CreativeHoldMs / 1000} s (Apps › Creative apps).");
+            }
 
             // "Launch with HDR": a game is being started through SmartHdrManager.exe --launch. Hold HDR from before the
             // game starts until a few seconds after it closes (games that only check HDR at startup then see it on).
@@ -1885,7 +1927,7 @@ namespace SmartHdrManager
                 _externalEnded = false;
 
                 // HDR that you had on was switched off for an SDR app or a recording app: back on once it is gone
-                if (_restoreHdr && !isForceSdr && canAttempt && now - _forceSdrSeenMs >= RestoreAfterMs)
+                if (_restoreHdr && !isForceSdr && canAttempt && !CreativeSdrHeld(s, now))
                 {
                     string what = _restoreFor;
                     _restoreHdr = false;
@@ -2366,13 +2408,16 @@ namespace SmartHdrManager
             return ok;
         }
 
-        private string? FindRunningHdrGame(Snapshot s, out string? exePath, out string? videoBlocker, out string? allBlocker)
+        /// <param name="creative">A creative app to look for ("Stay in SDR … until it closes"); <paramref name="creativeRunning"/> says whether it is open (has a window).</param>
+        private string? FindRunningHdrGame(Snapshot s, out string? exePath, out string? videoBlocker, out string? allBlocker,
+                                           string? creative, out bool creativeRunning)
         {
             exePath = null;
             videoBlocker = null;
             allBlocker = null;
+            creativeRunning = false;
             bool lookForBlockers = (s.VideoAuto && s.VideoBlockers.Count > 0) || s.AllBlockers.Count > 0;
-            if (s.HdrGames.Count == 0 && !lookForBlockers) return null;   // nothing to look for: skip the process list entirely
+            if (s.HdrGames.Count == 0 && !lookForBlockers && creative == null) return null;   // nothing to look for: skip the process list entirely
 
             Process[] all;
             try { all = Process.GetProcesses(); }
@@ -2383,6 +2428,11 @@ namespace SmartHdrManager
             {
                 try
                 {
+                    // Open = it still has a window: Photoshop can leave window-less processes behind after you close it,
+                    // which kept SDR on for good. Only window information is read, as for the foreground window.
+                    if (creative != null && !creativeRunning && p.ProcessName.Equals(creative, StringComparison.OrdinalIgnoreCase) &&
+                        p.MainWindowHandle != IntPtr.Zero)
+                        creativeRunning = true;
                     if (lookForBlockers)
                     {
                         string n = p.ProcessName;
@@ -3464,7 +3514,14 @@ namespace SmartHdrManager
             if (fromHotkey)
             {
                 System.Media.SystemSounds.Asterisk.Play();
-                TurnHdrOn($"'{procName}' added via hotkey", GetSnapshot().Monitors);
+                // A recording app set to "No HDR" or the SDR override: the game is added, but HDR stays off for now
+                // (switching it on here was undone a moment later by the block – an HDR flash with two black screens)
+                if (_runningAllBlocker != null)
+                    Log("HDR", $"'{procName}' added – HDR stays off while '{_runningAllBlocker}' is running (Apps › Recording & streaming).");
+                else if (OverrideMode == HdrOverride.ForceSdr)
+                    Log("HDR", $"'{procName}' added – HDR stays off while SDR is forced (tray menu).");
+                else
+                    TurnHdrOn($"'{procName}' added via hotkey", GetSnapshot().Monitors);
             }
             return true;
         }
@@ -3768,6 +3825,9 @@ namespace SmartHdrManager
                 if (!o.IsEmpty) exeOverrides[kv.Key.Trim()] = o;
             }
             c.GameExeOverrides = exeOverrides;
+            c.WindowPlacements = WindowMemory.Normalize(c.WindowPlacements);
+            c.AlwaysHdrShadowLift = Math.Clamp(c.AlwaysHdrShadowLift, 0, 100);
+            c.CreativeSdrHoldSeconds = c.CreativeSdrHoldSeconds < 0 ? -1 : Math.Clamp(c.CreativeSdrHoldSeconds, 3, 3600);
 
             // Learned launchers: case-insensitive keys, lower-case names, no empty entries
             var launchers = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);

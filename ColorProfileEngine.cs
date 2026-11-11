@@ -40,12 +40,21 @@ namespace SmartHdrManager
         /// <summary>
         /// Below SDR white: undo Windows' sRGB decode and apply the gamma. Above it: unchanged. No blend at the joint: both
         /// sides meet at W and the slope only changes by about 3% (2.2 x 1.055 / 2.4 = 0.967), far less than a visible kink.
+        /// <paramref name="lift"/> (0..1, shadow lift): blends the result in linear light back towards Windows' own sRGB
+        /// decode – 0 = the full gamma, 1 = no correction. The two curves differ almost only in the shadows (sRGB is
+        /// brighter there and within ~2% in the midtones), so this lifts the shadows and leaves the rest as it is. Both
+        /// curves rise and meet at W, so the blend rises and meets at W too.
         /// </summary>
-        public static double CorrectNits(double nits, double white, double gamma) =>
-            nits >= white ? nits : white * Math.Pow(TransferFunctions.SrgbEncode(Math.Max(nits, 0) / white), gamma);
+        public static double CorrectNits(double nits, double white, double gamma, double lift = 0)
+        {
+            if (nits >= white) return nits;
+            double x = Math.Max(nits, 0) / white;   // what Windows shows without correction (relative to W)
+            double corrected = Math.Pow(TransferFunctions.SrgbEncode(x), gamma);
+            return white * (corrected + Math.Clamp(lift, 0, 1) * (x - corrected));
+        }
 
-        public static double CorrectPq(double signal, double white, double gamma) =>
-            TransferFunctions.NitsToPq(CorrectNits(TransferFunctions.PqToNits(signal), white, gamma));
+        public static double CorrectPq(double signal, double white, double gamma, double lift = 0) =>
+            TransferFunctions.NitsToPq(CorrectNits(TransferFunctions.PqToNits(signal), white, gamma, lift));
 
         /// <summary>Linear interpolation in a LUT over 0..1, which is how Windows reads it.</summary>
         public static double Sample(double[] lut, double x)
@@ -56,15 +65,16 @@ namespace SmartHdrManager
         }
 
         /// <summary>What the final LUT must be at x: the correction first, then the calibration.</summary>
-        public static double Analytic(double x, double[] baseLut, double white, double gamma) => Sample(baseLut, CorrectPq(x, white, gamma));
+        public static double Analytic(double x, double[] baseLut, double white, double gamma, double lift = 0) =>
+            Sample(baseLut, CorrectPq(x, white, gamma, lift));
 
         /// <summary>Rounded to what an s15Fixed16 field can hold.</summary>
         public static double Quantize(double value) => Math.Round(value * 65536.0) / 65536.0;
 
-        public static double[] BuildLut(double[] baseLut, double white, double gamma, int entries)
+        public static double[] BuildLut(double[] baseLut, double white, double gamma, int entries, double lift = 0)
         {
             var lut = new double[entries];
-            for (int i = 0; i < entries; i++) lut[i] = Quantize(Analytic(i / (entries - 1.0), baseLut, white, gamma));
+            for (int i = 0; i < entries; i++) lut[i] = Quantize(Analytic(i / (entries - 1.0), baseLut, white, gamma, lift));
             return lut;
         }
     }
@@ -122,12 +132,12 @@ namespace SmartHdrManager
         /// A copy of the calibration profile with the correction folded into its LUTs. Matrix, luminance values and every
         /// other tag stay as they are. Throws when the result fails validation: such a profile is never installed.
         /// </summary>
-        public static byte[] FromCalibration(byte[] calibrationFile, double white, double gamma, string description)
+        public static byte[] FromCalibration(byte[] calibrationFile, double white, double gamma, string description, double lift = 0)
         {
             var icc = IccProfile.Parse(calibrationFile);
             var tag = icc.Find("MHC2") ?? throw new InvalidDataException("The calibration profile has no MHC2 tag.");
             var calibration = Mhc2Tag.Parse(tag.Data);
-            tag.Data = Corrected(calibration, white, gamma).Serialize();
+            tag.Data = Corrected(calibration, white, gamma, lift).Serialize();
             tag.OriginalOffset = 0;
 
             var desc = icc.Find("desc");
@@ -140,7 +150,7 @@ namespace SmartHdrManager
         }
 
         /// <summary>For a display without a calibration profile: identity matrix and LUT, luminance as the display reports it.</summary>
-        public static byte[] FromIdentity(double minNits, double maxNits, double white, double gamma, string description)
+        public static byte[] FromIdentity(double minNits, double maxNits, double white, double gamma, string description, double lift = 0)
         {
             var identity = new Mhc2Tag { MinNits = minNits, MaxNits = maxNits, Matrix = new double[] { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 } };
             for (int c = 0; c < 3; c++) identity.Luts[c] = new double[] { 0, 1 };
@@ -170,19 +180,19 @@ namespace SmartHdrManager
             Add("rTRC", linear);
             Add("gTRC", linear);
             Add("bTRC", linear);
-            Add("MHC2", Corrected(identity, white, gamma).Serialize());
+            Add("MHC2", Corrected(identity, white, gamma, lift).Serialize());
             return icc.Serialize();
         }
 
-        private static Mhc2Tag Corrected(Mhc2Tag calibration, double white, double gamma)
+        private static Mhc2Tag Corrected(Mhc2Tag calibration, double white, double gamma, double lift = 0)
         {
             var result = new Mhc2Tag { MinNits = calibration.MinNits, MaxNits = calibration.MaxNits, Matrix = calibration.Matrix };
             int entries = Math.Max(LutEntries, calibration.EntryCount);
             for (int c = 0; c < 3; c++)
             {
                 var baseLut = calibration.Luts[c];
-                result.Luts[c] = GammaCorrection.BuildLut(baseLut, white, gamma, entries);
-                string? problem = LutValidator.Validate(result.Luts[c], x => GammaCorrection.Analytic(x, baseLut, white, gamma));
+                result.Luts[c] = GammaCorrection.BuildLut(baseLut, white, gamma, entries, lift);
+                string? problem = LutValidator.Validate(result.Luts[c], x => GammaCorrection.Analytic(x, baseLut, white, gamma, lift));
                 if (problem != null) throw new InvalidDataException($"Generated LUT {"RGB"[c]} failed validation: {problem}");
             }
             return result;

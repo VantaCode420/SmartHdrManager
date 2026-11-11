@@ -142,7 +142,8 @@ namespace SmartHdrManager
         /// with HDR on. <paramref name="force"/> sets it again even if Windows already reports it (after standby Windows can
         /// drop the transform). Any failure falls back to calibration only. Returns false when something went wrong.
         /// </summary>
-        public bool Apply(HdrController.DisplayTarget d, bool corrected, double white, bool force, string trigger)
+        /// <param name="liftPercent">Shadow lift of the corrected profile, 0–100 % (0 = the full gamma 2.2 correction).</param>
+        public bool Apply(HdrController.DisplayTarget d, bool corrected, double white, bool force, string trigger, int liftPercent = 0)
         {
             if (!d.HdrEnabled)   // the HDR slot only matters while HDR is on
             {
@@ -172,14 +173,14 @@ namespace SmartHdrManager
             bool ok = true;
             if (corrected)
             {
-                string? name = EnsureCorrected(d, record, white);
+                string? name = EnsureCorrected(d, record, white, liftPercent);
                 if (name != null) target = name;
                 else ok = false;   // stays on calibration only; the reason is in Problems
             }
 
             bool unchanged = string.Equals(current, target, StringComparison.OrdinalIgnoreCase) && !force;
             if (!quiet || !unchanged || hadProblem)
-                ColorProfileLog.Write($"APPLY {d.Name} trigger={trigger} W={white:0.#} corrected={corrected} current='{current}' desired='{target}'{(force ? " (forced)" : "")}");
+                ColorProfileLog.Write($"APPLY {d.Name} trigger={trigger} W={white:0.#} lift={liftPercent}% corrected={corrected} current='{current}' desired='{target}'{(force ? " (forced)" : "")}");
             if (ok && hadProblem) _loggedProblems.Remove(d.DevicePath);
             bool switched = unchanged || Switch(d, record, target, current, force);
             if (!switched)
@@ -207,9 +208,10 @@ namespace SmartHdrManager
             return ok;
         }
 
-        /// <summary>The corrected profile for this display and white level: generated, validated, installed and associated.</summary>
-        private string? EnsureCorrected(HdrController.DisplayTarget d, DisplayRecord record, double white)
+        /// <summary>The corrected profile for this display, white level and shadow lift: generated, validated, installed and associated.</summary>
+        private string? EnsureCorrected(HdrController.DisplayTarget d, DisplayRecord record, double white, int liftPercent)
         {
+            liftPercent = Math.Clamp(liftPercent, 0, 100);
             if (white <= 0) { Problem(d, "Windows did not report the SDR brightness."); return null; }
             string? colorDir = ColorDir;
             if (colorDir == null) { Problem(d, "Windows did not report its colour folder."); return null; }
@@ -219,12 +221,15 @@ namespace SmartHdrManager
             catch (Exception ex) { Problem(d, $"The calibration profile could not be read: {ex.Message}"); return null; }
 
             long nits = (long)Math.Round(white);
-            string name = $"SHM_{Short(d.DevicePath)}_{Short(record.OriginalDefault!)}{Convert.ToHexString(SHA256.HashData(calibration))[..4]}_W{nits}_g22.icm";
+            // Without a lift the name is the same as before 3.0.1, so existing profiles are reused
+            string lift = liftPercent > 0 ? $"_L{liftPercent}" : string.Empty;
+            string name = $"SHM_{Short(d.DevicePath)}_{Short(record.OriginalDefault!)}{Convert.ToHexString(SHA256.HashData(calibration))[..4]}_W{nits}_g22{lift}.icm";
             if (record.Generated.Contains(name, StringComparer.OrdinalIgnoreCase) && File.Exists(Path.Combine(colorDir, name)))
                 return name;
 
             byte[] corrected;
-            try { corrected = CorrectedProfile.FromCalibration(calibration, nits, Gamma, $"SHM gamma 2.2 at {nits} nits"); }
+            string description = liftPercent > 0 ? $"SHM gamma 2.2 at {nits} nits, shadow lift {liftPercent} %" : $"SHM gamma 2.2 at {nits} nits";
+            try { corrected = CorrectedProfile.FromCalibration(calibration, nits, Gamma, description, liftPercent / 100.0); }
             catch (Exception ex) { Problem(d, $"The corrected profile was not created: {ex.Message}"); return null; }   // incl. failed validation
 
             try
@@ -233,7 +238,7 @@ namespace SmartHdrManager
                 File.WriteAllBytes(Path.Combine(ProfileFolder, name), corrected);
             }
             catch (Exception ex) { Problem(d, $"The corrected profile could not be saved: {ex.Message}"); return null; }
-            ColorProfileLog.Write($"Generated '{name}': {corrected.Length} bytes, W={nits} nits, base '{record.OriginalDefault}'");
+            ColorProfileLog.Write($"Generated '{name}': {corrected.Length} bytes, W={nits} nits, shadow lift {liftPercent} %, base '{record.OriginalDefault}'");
             if (!record.Generated.Contains(name, StringComparer.OrdinalIgnoreCase))
             {
                 record.Generated.Add(name);

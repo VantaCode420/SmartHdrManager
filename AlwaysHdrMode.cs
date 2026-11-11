@@ -37,6 +37,9 @@ namespace SmartHdrManager
         private bool _alwaysWasHdrOn;           // HDR was on when the app started (or the mode was switched on)
         private bool _alwaysRealHdrOn;          // Windows HDR is really on (for the window header and the tray icon)
         private readonly Dictionary<string, (double Stable, double Pending, long Since)> _white = new(StringComparer.OrdinalIgnoreCase);
+        private int _shadowLift;                // shadow lift in use (%), changed once the setting has stayed the same for a moment
+        private int _shadowLiftPending;
+        private long _shadowLiftSince;
 
         /// <summary>Short state for the Settings page (any thread).</summary>
         public string AlwaysHdrStatus { get; private set; } = string.Empty;
@@ -99,7 +102,7 @@ namespace SmartHdrManager
             foreach (var d in displays.Where(d => d.HdrEnabled))
             {
                 double white = StableWhite(d, now);
-                Profiles.Apply(d, corrected: !_correctionOff.Contains(d.DevicePath), white, force, trigger);
+                Profiles.Apply(d, corrected: !_correctionOff.Contains(d.DevicePath), white, force, trigger, _shadowLift);
             }
             UpdateAlwaysStatus(displays);
         }
@@ -184,7 +187,7 @@ namespace SmartHdrManager
                     else Log("ERROR", HdrController.LastError);
                 }
             }
-            else if (sdrFor == null && _alwaysRealSdr && spacing && now - _forceSdrSeenMs >= RestoreAfterMs)
+            else if (sdrFor == null && _alwaysRealSdr && spacing && !CreativeSdrHeld(s, now))
             {
                 Log("HDR", $"Always-HDR: '{_alwaysSdrFor}' no longer needs SDR – HDR back on.");
                 _lastRealSwitchMs = now;
@@ -226,6 +229,20 @@ namespace SmartHdrManager
             }
             else if (!Paused) _pauseCorrected = false;
 
+            // Shadow lift: a new profile once the setting has stayed the same for a moment (clicked several times in a row)
+            if (s.ShadowLift != _shadowLiftPending)
+            {
+                _shadowLiftPending = s.ShadowLift;
+                _shadowLiftSince = now;
+            }
+            else if (_shadowLiftPending != _shadowLift && now - _shadowLiftSince >= WhiteDebounceMs)
+            {
+                Log("COLOR", $"Always-HDR: shadow lift {_shadowLift} % -> {_shadowLiftPending} %.");
+                ColorProfileLog.Write($"Shadow lift {_shadowLift} % -> {_shadowLiftPending} %");
+                _shadowLift = _shadowLiftPending;
+                Interlocked.CompareExchange(ref _alwaysReapply, 1, 0);
+            }
+
             int reapply = Interlocked.Exchange(ref _alwaysReapply, 0);
             if (reapply == 0 && now < _nextAlwaysCheckMs) return;
             _nextAlwaysCheckMs = now + AlwaysCheckMs;
@@ -244,10 +261,12 @@ namespace SmartHdrManager
                 foreach (var d in displays) _correctionOff.Add(d.DevicePath);
             _alwaysRealSdr = false;
             _alwaysStartPending = true;
+            _shadowLift = _shadowLiftPending = s.ShadowLift;   // no waiting at the start
             _queriedMonitors = null;   // the next HDR reading is a fresh starting point, not "changed by someone else"
             Interlocked.Exchange(ref _forceHdrQuery, 1);
             Interlocked.Exchange(ref _alwaysReapply, 1);
-            Log("HDR", $"Always-HDR mode on: HDR stays on, SDR content gets a gamma 2.2 correction ({s.Monitors.Describe()}).");
+            Log("HDR", $"Always-HDR mode on: HDR stays on, SDR content gets a gamma 2.2 correction" +
+                       $"{(s.ShadowLift > 0 ? $" with {s.ShadowLift} % shadow lift" : "")} ({s.Monitors.Describe()}).");
         }
 
         /// <param name="removeEverything">Mode switched off: the generated profiles are removed. On exit they are kept.</param>
